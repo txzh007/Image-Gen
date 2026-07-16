@@ -43,27 +43,48 @@ cd genimg
 
 ### 2. 配置
 
+**最简配置（只需一个环境变量）：**
+
+```bash
+# 设置 API Key（所有 provider 共用）
+export GENIMG_API_KEY="sk-xxx"
+
+# Windows PowerShell:
+$env:GENIMG_API_KEY="sk-xxx"
+
+# Windows CMD:
+set GENIMG_API_KEY=sk-xxx
+```
+
+**可选：创建配置文件（自定义中转站/模型）**
+
 ```bash
 # 复制配置模板
 cp providers.example.json providers.json
 
 # 编辑 providers.json，填入你的中转站信息：
-# - base_url: 中转站地址
+# - base_url: 中转站地址（可选，不填则使用官方或默认地址）
 # - model: 模型名
-# - mode: chat | images | gemini（不确定就先用 chat）
+# - mode: chat | images | gemini
+```
 
-# 设置 API Key 环境变量
-export BANANA_API_KEY="sk-xxx"
-export IMAGE2_API_KEY="sk-yyy"
+**配置示例：**
 
-# Windows PowerShell:
-# $env:BANANA_API_KEY="sk-xxx"
+```json
+{
+  "image2": {
+    "base_url": "https://你的中转站/v1",
+    "api_key_env": "GENIMG_API_KEY",
+    "mode": "images",
+    "model": "gpt-image-2"
+  }
+}
 ```
 
 **不确定接口格式？** 先跑一次 debug 看真实返回：
 
 ```bash
-python genimg.py "test" --provider banana --debug
+python genimg.py "test" --provider image2 --debug
 ```
 
 根据输出选择 `mode`：

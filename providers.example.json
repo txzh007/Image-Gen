@@ -1,5 +1,5 @@
 {
-  "_comment": "复制本文件为 providers.json 后填写。api_key 建议放环境变量，不要写死在文件里提交。",
+  "_comment": "复制本文件为 providers.json 后填写。所有 provider 共用一个 API key 环境变量 GENIMG_API_KEY",
 
   "image2": {
     "base_url": "https://你的中转站/v1",
