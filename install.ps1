@@ -41,8 +41,8 @@ Write-Host "✅ 安装完成！位置: $target" -ForegroundColor Green
 Write-Host ""
 Write-Host "📋 下一步："
 Write-Host "  1. 编辑 $target\providers.json 填入中转站地址"
-Write-Host "  2. 设置环境变量: `$env:BANANA_API_KEY='sk-xxx'"
-Write-Host "  3. 测试: python $target\genimg.py 'test' --provider banana --debug"
+Write-Host "  2. 设置环境变量: `$env:GENIMG_API_KEY='sk-xxx'"
+Write-Host "  3. 测试: python $target\genimg.py 'test' --provider image2 --debug"
 Write-Host ""
 if ($platform -eq "standalone") {
     Write-Host "💡 作为 skill 使用：将此目录移到 $env:USERPROFILE\.claude\skills\ 或 .opencode\skills\"

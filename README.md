@@ -14,22 +14,44 @@
 
 ### 1. 安装
 
-**方式 A：作为 Claude Code / OpenCode skill**
+**一键安装（推荐）**
+
+Linux/Mac:
+```bash
+curl -fsSL https://raw.githubusercontent.com/txzh007/Image-Gen/master/install.sh | bash
+```
+
+Windows PowerShell:
+```powershell
+irm https://raw.githubusercontent.com/txzh007/Image-Gen/master/install.ps1 | iex
+```
+
+安装脚本会自动：
+- 检测 Python 3 环境
+- 克隆仓库到 `~/.claude/skills/genimg`
+- 创建配置模板 `providers.json`
+
+---
+
+**手动安装**
+
+**方式 A：作为 Claude Code skill**
 
 ```bash
 # 克隆到 skills 目录
-cd .claude/skills/        # 或 .opencode/skills/
-git clone <本仓库URL> genimg
-
-# 或手动下载解压到该目录
+cd ~/.claude/skills/        # Windows: C:\Users\用户名\.claude\skills
+git clone https://github.com/txzh007/Image-Gen.git genimg
+cd genimg
+cp providers.example.json providers.json
 ```
 
 **方式 B：作为独立 CLI**
 
 ```bash
 # 克隆到任意目录
-git clone <本仓库URL>
-cd genimg
+git clone https://github.com/txzh007/Image-Gen.git
+cd Image-Gen
+cp providers.example.json providers.json
 ```
 
 **方式 C：Codex 集成**
