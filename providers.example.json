@@ -1,26 +1,33 @@
 {
   "_comment": "复制本文件为 providers.json 后填写。所有 provider 共用一个 API key 环境变量 GENIMG_API_KEY",
 
+  "banana": {
+    "base_url": "https://你的中转站/v1",
+    "api_key_env": "GENIMG_API_KEY",
+    "mode": "images",
+    "model": "gemini-3-pro-image",
+    "endpoint": "/images/generations",
+    "edit_mode": "chat",
+    "edit_endpoint": "/chat/completions",
+    "defaults": {
+      "aspect_ratio": "1:1",
+      "quality": "1K",
+      "n": 1
+    }
+  },
   "image2": {
     "base_url": "https://你的中转站/v1",
     "api_key_env": "GENIMG_API_KEY",
     "mode": "images",
     "model": "gpt-image-2",
-    "endpoint": "/images/generations"
-  },
-  "gemini": {
-    "base_url": "https://你的中转站/v1",
-    "api_key_env": "GENIMG_API_KEY",
-    "mode": "images",
-    "model": "gemini-3.1-flash-image",
-    "endpoint": "/images/generations"
-  },
-  "gemini-native": {
-    "_comment": "Gemini 原生接口（不支持 quality/size 参数，但响应快）",
-    "base_url": "https://你的中转站",
-    "api_key_env": "GENIMG_API_KEY",
-    "mode": "gemini",
-    "model": "gemini-3.1-flash-image",
-    "endpoint": "/v1beta/models/{model}:generateContent"
+    "endpoint": "/images/generations",
+    "edit_mode": "images",
+    "edit_endpoint": "/images/edits",
+    "defaults": {
+      "size": "1024x1024",
+      "quality": "high",
+      "output_format": "png",
+      "n": 1
+    }
   }
 }

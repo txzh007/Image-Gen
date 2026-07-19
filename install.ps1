@@ -25,7 +25,7 @@ if ((Get-Command git -ErrorAction SilentlyContinue) -and $env:GENIMG_REPO) {
 } else {
     Write-Host "📦 从当前目录复制..."
     New-Item -ItemType Directory -Path $target -Force | Out-Null
-    Copy-Item genimg.py, SKILL.md, README.md, providers.example.json, .gitignore -Destination $target
+    Copy-Item genimg.py, genvideo.py, SKILL.md, README.md, providers.example.json, .gitignore -Destination $target
 }
 
 Set-Location $target
@@ -43,6 +43,7 @@ Write-Host "📋 下一步："
 Write-Host "  1. 编辑 $target\providers.json 填入中转站地址"
 Write-Host "  2. 设置环境变量: `$env:GENIMG_API_KEY='sk-xxx'"
 Write-Host "  3. 测试: python $target\genimg.py 'test' --provider image2 --debug"
+Write-Host "  4. 视频 dry-run: python $target\genvideo.py 'test video' --dry-run"
 Write-Host ""
 if ($platform -eq "standalone") {
     Write-Host "💡 作为 skill 使用：将此目录移到 $env:USERPROFILE\.claude\skills\ 或 .opencode\skills\"

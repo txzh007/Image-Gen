@@ -2,14 +2,18 @@
 providers.json
 providers.local.json
 .env
+.DS_Store
 
-# 输出图片
+# 输出图片与视频
 output/
 *.png
 *.jpg
 *.jpeg
 *.webp
 *.gif
+*.mp4
+*.mov
+*.webm
 
 # Python
 __pycache__/

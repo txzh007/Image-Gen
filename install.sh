@@ -25,7 +25,7 @@ if command -v git &> /dev/null && [ -n "$GENIMG_REPO" ]; then
 else
     echo "📦 从当前目录复制..."
     mkdir -p "$TARGET"
-    cp genimg.py SKILL.md README.md providers.example.json .gitignore "$TARGET/"
+    cp genimg.py genvideo.py configure-macos.sh SKILL.md README.md providers.example.json .gitignore "$TARGET/"
 fi
 
 cd "$TARGET"
@@ -43,6 +43,7 @@ echo "📋 下一步："
 echo "  1. 编辑 $TARGET/providers.json 填入中转站地址"
 echo "  2. 设置环境变量: export GENIMG_API_KEY='sk-xxx'"
 echo "  3. 测试: python $TARGET/genimg.py 'test' --provider image2 --debug"
+echo "  4. 视频 dry-run: python $TARGET/genvideo.py 'test video' --dry-run"
 echo ""
 if [ "$PLATFORM" = "standalone" ]; then
     echo "💡 作为 skill 使用：将此目录移到 ~/.claude/skills/ 或 ~/.opencode/skills/"
