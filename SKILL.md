@@ -116,17 +116,57 @@ python3 genvideo.py "海边日出延时摄影" --seconds 10 --no-wait
 python3 genvideo.py --task-id task_xxx --out ./output/resumed.mp4
 ```
 
-参考图片、视频和音频必须是公网 URL；重复相应参数传入：
+### 本地文件自动上传（推荐）
+
+视频任务的参考素材需要公网 URL。使用 `--auto-upload` 可自动上传本地文件：
+
+```bash
+# 自动上传本地图片到 Catbox（默认推荐，无需配置）
+python3 genvideo.py "让这只橙色小猫飞向天空，保持猫的外观特征" \
+  --seconds 10 \
+  --image ./local-cat.png \
+  --auto-upload catbox \
+  --out ./output/flying-cat.mp4
+
+# 支持多个本地文件
+python3 genvideo.py "结合两张图片的元素创作视频" \
+  --seconds 10 \
+  --image ./cat.png \
+  --image ./background.jpg \
+  --auto-upload catbox
+```
+
+支持的图床服务：
+- `catbox` - 默认推荐，完全免费，无需配置，最大 200MB
+- `telegraph` - Telegram 官方，最大 5MB，仅图片
+- `smms` - 国内访问快，可匿名，最大 5MB
+- `imgbb` - 需要 API key，无限上传
+
+### 手动上传
+
+也可以先用 `upload.py` 上传，再使用返回的 URL：
+
+```bash
+# 上传文件
+python3 upload.py ./cat.png
+# 输出: https://files.catbox.moe/xxxxx.png
+
+# 使用 URL 创建视频
+python3 genvideo.py "让这只猫飞起来" \
+  --seconds 10 \
+  --image https://files.catbox.moe/xxxxx.png
+```
+
+参考图片、视频和音频都支持本地路径（配合 `--auto-upload`）或公网 URL：
 
 ```bash
 python3 genvideo.py "保持参考猫的形象，让它穿披风飞向城市" \
   --seconds 10 \
   --image https://example.com/cat.png \
   --video https://example.com/motion.mp4 \
-  --audio https://example.com/music.mp3
+  --audio https://example.com/music.mp3 \
+  --auto-upload catbox
 ```
-
-本地文件路径不能直接放进视频任务 JSON。先上传到中转站素材库或可公开访问的对象存储，再传 URL。
 
 ## 给 agent 的执行提示
 
@@ -138,7 +178,7 @@ python3 genvideo.py "保持参考猫的形象，让它穿披风飞向城市" \
 - OpenAI Images 使用 `--size/--quality/--n/--background/--output-format`。`--response-format` 只适用于 DALL-E 2/3 的 `url|b64_json`，GPT Image 默认返回 base64。
 - 内置 `banana` 使用 `--aspect-ratio` 和 `--quality 1K|2K|4K`；脚本会写入中转站的 `extra_fields.google.image_config`。
 - 内置 `banana` 与 `image2` 都支持图片编辑：传 `--image` 后自动使用 provider 的 `edit_mode` / `edit_endpoint`。banana 使用 Chat 多模态 data-URI；image2 使用 `/images/edits` multipart 的可重复 `image[]`。
-- 编辑提示词要明确列出“改什么”和“必须保持什么”。需要多张参考图时重复 `--image`。局部遮罩 `--mask` 仅用于 `edit_mode=images`（内置 image2）；遮罩应与第一张输入图同尺寸、同格式且带 alpha 通道。
+- 编辑提示词要明确列出”改什么”和”必须保持什么”。需要多张参考图时重复 `--image`。局部遮罩 `--mask` 仅用于 `edit_mode=images`（内置 image2）；遮罩应与第一张输入图同尺寸、同格式且带 alpha 通道。
 - `chat` 没有统一的生图参数协议。中转站要求私有字段时用 `--param`，或写在 provider 的 `extra_body`，不要假设 OpenAI Images 参数会自动生效。
 - 请求失败或怀疑参数未生效时先加 `--dry-run` 检查请求体，再用 `--debug` 查看响应。
 - 跑完把保存路径回给用户，并说明实际 provider、model、尺寸/质量等关键参数；若脚本提示参数被忽略，也要明确告知用户。
@@ -147,7 +187,9 @@ python3 genvideo.py "保持参考猫的形象，让它穿披风飞向城市" \
 - 视频是付费异步任务。创建成功后立即记录 `task_id` 并持续轮询；中断或超时后使用 `--task-id` 续查，绝不因等待中断而重复创建。
 - 用户指定时长和比例时必须使用 `--seconds` 与 `--aspect-ratio`，不要只写进 prompt。创建前若返回余额不足，报告所需与剩余额度，不重复尝试相同任务。
 - 遇到 `PROVIDER_MODERATION_ERROR` 时原样报告。仅在能保持用户主要视觉意图时，把受限角色名称或标志改写为原创描述并最多重试一次，避免重复扣费。
-- 视频参考素材只接受公网 URL。不要把本地路径传给 `--image/--video/--audio`；先取得素材 URL。
+- **视频任务的参考素材（--image/--video/--audio）：优先使用 `--auto-upload catbox` 自动上传本地文件。**只有在用户明确提供了公网 URL 时才直接使用 URL。不要要求用户手动上传。
+- 检测到本地文件路径时，自动添加 `--auto-upload catbox` 参数。脚本会自动上传并打印 URL。
+- 上传失败时才提示用户手动上传或使用其他图床服务（telegraph、smms、imgbb）。
 - `/content` 下载失败时让脚本使用任务返回的临时 `video_url` 回退；不要把 API key 转发给第三方对象存储 URL。
 - 视频完成后回报任务 ID、模型、实际时长、分辨率、编码和本地绝对路径；能使用 `ffprobe` 时执行一次媒体校验。
 - 不要把 API key 打印或写进任何文件。

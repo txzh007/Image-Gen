@@ -63,12 +63,35 @@ def parse_param_assignments(assignments):
     return result
 
 
-def validate_reference_urls(kind, values):
+def validate_reference_urls(kind, values, auto_upload=None):
+    """验证参考素材 URL，可选自动上传本地文件"""
+    processed = []
     for value in values or []:
-        if not re.match(r"^https?://", value, re.I):
-            raise ValueError(
-                f"--{kind} 只接受公网 http/https URL，不能直接传本地路径：{value}"
-            )
+        if re.match(r"^https?://", value, re.I):
+            # 已经是 URL，直接使用
+            processed.append(value)
+        elif os.path.exists(value):
+            # 本地文件路径
+            if auto_upload:
+                print(f"[upload] 检测到本地文件 {value}，正在上传到 {auto_upload}...", file=sys.stderr)
+                try:
+                    from upload import upload_file
+                    url = upload_file(value, auto_upload)
+                    print(f"[upload] ✓ 上传成功: {url}", file=sys.stderr)
+                    processed.append(url)
+                except Exception as e:
+                    raise ValueError(f"自动上传 {value} 失败: {e}")
+            else:
+                raise ValueError(
+                    f"--{kind} 检测到本地文件路径 {value}，但视频任务需要公网 URL。\n"
+                    f"解决方案：\n"
+                    f"  1. 使用 --auto-upload 自动上传: --auto-upload catbox\n"
+                    f"  2. 手动上传: python3 upload.py {value}\n"
+                    f"  3. 使用已有的公网 URL"
+                )
+        else:
+            raise ValueError(f"--{kind} 参数无效（既不是 URL 也不是本地文件）: {value}")
+    return processed
 
 
 def build_video_body(
@@ -80,12 +103,13 @@ def build_video_body(
     videos=None,
     audios=None,
     extra_body=None,
+    auto_upload=None,
 ):
     if not prompt:
         raise ValueError("创建视频任务时必须提供提示词。")
-    validate_reference_urls("image", images)
-    validate_reference_urls("video", videos)
-    validate_reference_urls("audio", audios)
+    images = validate_reference_urls("image", images, auto_upload)
+    videos = validate_reference_urls("video", videos, auto_upload)
+    audios = validate_reference_urls("audio", audios, auto_upload)
 
     body = {
         "model": model,
@@ -293,11 +317,13 @@ def create_parser():
     parser.add_argument("--aspect-ratio", default="16:9",
                         help="画面比例，例如 16:9、9:16、1:1")
     parser.add_argument("--image", action="append", default=[],
-                        help="公网参考图片 URL，可重复；不能直接传本地路径")
+                        help="参考图片 URL 或本地路径（配合 --auto-upload），可重复")
     parser.add_argument("--video", action="append", default=[],
-                        help="公网参考视频 URL，可重复；不能直接传本地路径")
+                        help="参考视频 URL 或本地路径（配合 --auto-upload），可重复")
     parser.add_argument("--audio", action="append", default=[],
-                        help="公网参考音频 URL，可重复；不能直接传本地路径")
+                        help="参考音频 URL 或本地路径（配合 --auto-upload），可重复")
+    parser.add_argument("--auto-upload", choices=['catbox', 'telegraph', 'smms', 'imgbb'],
+                        help="自动上传本地文件到图床（catbox=默认推荐，无需配置）")
     parser.add_argument("--task-id", help="续查已有任务，不创建新任务")
     parser.add_argument("--no-wait", action="store_true",
                         help="创建后立即返回 task_id，不轮询或下载")
@@ -356,6 +382,7 @@ def main(argv=None):
                 images=args.image,
                 videos=args.video,
                 audios=args.audio,
+                auto_upload=args.auto_upload,
             )
             body = deep_merge(body, param_body)
         except ValueError as error:

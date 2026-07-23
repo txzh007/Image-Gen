@@ -326,7 +326,55 @@ python3 genvideo.py --task-id task_xxx --out ./output/sunrise.mp4
 
 ### 参考图片、视频与音频
 
-参考素材必须是公网可访问 URL，不能直接使用本地文件路径：
+#### 方案 1：自动上传本地文件（推荐）
+
+使用 `--auto-upload` 自动将本地文件上传到图床，无需手动处理：
+
+```bash
+python3 genvideo.py "让这只橙色小猫飞向天空，保持猫的外观特征" \
+  --seconds 10 \
+  --image ./local-cat.png \
+  --auto-upload catbox \
+  --out ./output/flying-cat.mp4
+```
+
+支持的图床服务：
+
+| 服务 | 特点 | 需要 API key | 文件限制 |
+|------|------|-------------|---------|
+| `catbox` | **默认推荐**，完全免费，无需配置 | 否 | 200MB |
+| `telegraph` | Telegram 官方，稳定可靠 | 否 | 5MB，仅图片 |
+| `smms` | 国内访问快，可匿名 | 否（可选） | 5MB |
+| `imgbb` | 无限上传，需注册 | 是 | 未公开 |
+
+脚本会自动检测本地路径并上传，打印上传结果 URL。
+
+#### 方案 2：手动上传
+
+先使用 `upload.py` 上传文件：
+
+```bash
+# 上传到 Catbox（默认）
+python3 upload.py ./cat.png
+# 输出: https://files.catbox.moe/xxxxx.png
+
+# 上传到 Telegraph
+python3 upload.py ./cat.png --service telegraph
+# 输出: https://telegra.ph/file/xxxxx.png
+```
+
+然后使用返回的 URL：
+
+```bash
+python3 genvideo.py "让这只猫飞起来" \
+  --seconds 10 \
+  --image https://files.catbox.moe/xxxxx.png \
+  --out ./output/video.mp4
+```
+
+#### 方案 3：使用已有公网 URL
+
+如果素材已在中转站素材库或对象存储：
 
 ```bash
 python3 genvideo.py "保持参考图片的人物形象，采用参考视频的动作节奏，生成自然流畅的短片" \
@@ -344,8 +392,6 @@ python3 genvideo.py "保持参考图片的人物形象，采用参考视频的�
 --image https://example.com/a.png --image https://example.com/b.png
 ```
 
-本地素材需要先上传到中转站素材库或对象存储，再把返回 URL 传给脚本。
-
 ### 只检查请求、不创建付费任务
 
 ```bash
@@ -359,9 +405,10 @@ python3 genvideo.py "测试视频" --seconds 10 --aspect-ratio 16:9 --dry-run
 | `--model` | 视频模型 | `video-ds-2.0-fast`、`video-ds-2.0` |
 | `--seconds` | 视频时长 | `5`、`10`、`15` |
 | `--aspect-ratio` | 画面比例 | `16:9`、`9:16`、`1:1` |
-| `--image` | 公网参考图片 URL，可重复 | `https://.../a.png` |
-| `--video` | 公网参考视频 URL，可重复 | `https://.../a.mp4` |
-| `--audio` | 公网参考音频 URL，可重复 | `https://.../a.mp3` |
+| `--image` | 参考图片 URL 或本地路径，可重复 | `https://.../a.png` 或 `./cat.png` |
+| `--video` | 参考视频 URL 或本地路径，可重复 | `https://.../a.mp4` 或 `./motion.mp4` |
+| `--audio` | 参考音频 URL 或本地路径，可重复 | `https://.../a.mp3` 或 `./music.mp3` |
+| `--auto-upload` | 自动上传本地文件到图床 | `catbox`、`telegraph`、`smms`、`imgbb` |
 | `--task-id` | 续查已有任务 | `task_xxx` |
 | `--no-wait` | 创建后立即返回任务 ID | — |
 | `--poll-interval` | 轮询间隔秒数 | `15` |
