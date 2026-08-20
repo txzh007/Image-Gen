@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sub2 图片与视频生成"
+  short_description: "通过 Sub2 生成和编辑图片，并创建、续查和下载异步视频任务"
+  default_prompt: "使用 $genimg 根据我的要求生成或编辑图片，并将结果保存到当前项目。"

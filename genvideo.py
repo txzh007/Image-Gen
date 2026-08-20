@@ -76,7 +76,12 @@ def validate_reference_urls(kind, values, auto_upload=None):
                 print(f"[upload] 检测到本地文件 {value}，正在上传到 {auto_upload}...", file=sys.stderr)
                 try:
                     from upload import upload_file
-                    url = upload_file(value, auto_upload)
+                    upload_api_key = None
+                    if auto_upload == "imgbb":
+                        upload_api_key = os.environ.get("IMGBB_API_KEY")
+                    elif auto_upload == "smms":
+                        upload_api_key = os.environ.get("SMMS_API_KEY")
+                    url = upload_file(value, auto_upload, upload_api_key)
                     print(f"[upload] ✓ 上传成功: {url}", file=sys.stderr)
                     processed.append(url)
                 except Exception as e:
@@ -90,7 +95,10 @@ def validate_reference_urls(kind, values, auto_upload=None):
                     f"  3. 使用已有的公网 URL"
                 )
         else:
-            raise ValueError(f"--{kind} 参数无效（既不是 URL 也不是本地文件）: {value}")
+            raise ValueError(
+                f"--{kind} 参数无效（既不是 URL 也不是本地文件）: {value}；"
+                "视频参考素材必须使用公网 URL。"
+            )
     return processed
 
 
@@ -328,10 +336,10 @@ def create_parser():
     parser.add_argument("--no-wait", action="store_true",
                         help="创建后立即返回 task_id，不轮询或下载")
     parser.add_argument("--out", "-o", help="输出 MP4 路径")
-    parser.add_argument("--base-url", help="覆盖 IMAGE_API_BASE")
+    parser.add_argument("--base-url", help="已禁用；地址只能来自 IMAGE_API_BASE")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT,
                         help=f"视频任务路径，默认 {DEFAULT_ENDPOINT}")
-    parser.add_argument("--api-key", help="覆盖 API key（不建议，可能进入命令历史）")
+    parser.add_argument("--api-key", help="已禁用；Key 只能来自 GENIMG_API_KEY")
     parser.add_argument("--poll-interval", type=int, default=15,
                         help="轮询间隔秒数，默认 15")
     parser.add_argument("--wait-timeout", type=int, default=900,
@@ -358,15 +366,18 @@ def main(argv=None):
     if not args.task_id and not args.prompt:
         parser.error("创建任务时缺少视频提示词")
 
-    base_url = args.base_url or os.environ.get("IMAGE_API_BASE")
-    api_key = (
-        args.api_key
-        or os.environ.get("GENIMG_API_KEY")
-        or os.environ.get("IMAGE_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-    )
+    if args.base_url or args.api_key:
+        parser.error(
+            "安全限制：API 地址和 Key 只能通过 IMAGE_API_BASE、GENIMG_API_KEY 提供"
+        )
+    base_url = os.environ.get("IMAGE_API_BASE")
+    api_key = os.environ.get("GENIMG_API_KEY")
     if not base_url:
-        parser.error("缺少 IMAGE_API_BASE，或使用 --base-url 指定")
+        parser.error("缺少 IMAGE_API_BASE")
+    if not base_url.rstrip("/").endswith("/v1"):
+        parser.error("IMAGE_API_BASE 必须包含并以 /v1 结尾")
+    if not api_key and not args.dry_run:
+        parser.error("缺少 GENIMG_API_KEY")
     setup_proxy(args.no_proxy)
     headers = build_headers(api_key)
 

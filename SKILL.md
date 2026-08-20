@@ -1,234 +1,122 @@
 ---
 name: genimg
-description: 生成或编辑图片和视频。当用户要求“生图、画图、文生图、图生图、图片编辑、生成视频、即梦视频、Seedance、文生视频、图生视频、视频续作、edit image、generate image、generate video”时使用。图片支持 banana 与 image2；视频支持异步 video-ds-2.0 与 video-ds-2.0-fast 任务。
+description: 通过 Sub2API 生成和编辑图片、创建和续查异步视频任务。用户要求生图、画图、文生图、图生图、图片编辑、Gemini 图片、GPT Image、即梦视频、Seedance、文生视频、图生视频或视频续作时使用。
 ---
 
-# genimg — 图片与视频生成 skill
+# genimg
 
-使用零依赖 Python 脚本调用中转站：`genimg.py` 处理图片，`genvideo.py` 处理异步视频任务。适用于 Claude Code / Codex / OpenCode 等任意能运行 shell 的 agent。
+使用本目录中的零依赖 Python 3 脚本：
 
-## 首次配置（只做一次）
+- `genimg.py`：生成或编辑图片。
+- `genvideo.py`：创建、轮询、续查并下载视频任务。
+- `upload.py`：经用户同意后，把视频参考素材上传到第三方图床。
 
-macOS 推荐直接运行配置脚本。它把 key 存入 macOS Keychain，并配置 `.zprofile` 与 `.zshrc`：
+在运行命令时使用 Skill 目录中的脚本绝对路径；不要假设当前工作目录就是 Skill
+目录。让输出路径指向用户当前工作目录或用户明确指定的位置。
+
+## 配置
+
+只从环境变量读取中转地址和用户 Key：
 
 ```bash
-bash configure-macos.sh
-source "$HOME/.genimg-env.zsh"
+export IMAGE_API_BASE="https://你的中转站/v1"
+export GENIMG_API_KEY="sk-xxx"
 ```
 
-需要填写两项：`IMAGE_API_BASE`（通常以 `/v1` 结尾）和 `GENIMG_API_KEY`。内置 provider 已在 `providers.example.json` 中配置：
-
-- `banana`：`gemini-3-pro-image`，默认入口，优先高质量和复杂指令遵循。
-- `image2`：`gpt-image-2`。
-- 即梦视频：`video-ds-2.0-fast`（默认快速版）与 `video-ds-2.0`（标准版）。
-
-其他平台或需要多个 provider 时按以下方式手动配置：
-
-1. 复制 `providers.example.json` 为 `providers.json`，填入各分组的 `base_url` / `model` / `mode`。可在 `defaults` 中保存该 provider 的默认生图参数。
-2. 设置中转站地址和 API key；需要 provider 独立 key 时再修改 `api_key_env`：
-
-   ```bash
-   export IMAGE_API_BASE="https://你的中转站/v1"
-   export GENIMG_API_KEY="sk-xxx"
-   ```
-
-3. **不确定接口格式时**，先跑一次 debug 看真实返回，再定 `mode`：
-
-   ```bash
-   python3 genimg.py "a cat" --provider image2 --debug --no-proxy
-   ```
-
-   - 返回里是 `b64_json` / `url` → 用 `--mode images`
-   - 返回像聊天消息、图片藏在 markdown 或 `image_url` 里 → 用 `--mode chat`
-   - 返回里有 `inlineData` → 用 `--mode gemini`
-   
-   **常见问题**：遇到 Cloudflare 1010 错误或代理干扰时加 `--no-proxy`。
-
-## 用法
+要求 `IMAGE_API_BASE` 以 `/v1` 结尾。只使用 `IMAGE_API_BASE` 和
+`GENIMG_API_KEY`，不要读取配置文件 Key 或上游 Key，
+不要使用已禁用的 `--base-url`、`--api-key`、`--endpoint`、`--edit-endpoint` 绕过
+中转。首次使用时可以执行不产生费用的检查：
 
 ```bash
-# 单个分组
+python3 genimg.py "配置检查" --provider banana --dry-run
+python3 genvideo.py "配置检查" --dry-run
+```
+
+## 图片工作流
+
+根据用户意图选择 provider：
+
+- 默认使用 `banana`，模型为 `gpt-image-gemini-flash`。
+- 只有用户明确要求 Pro 或更高质量时，才添加
+  `--model gpt-image-gemini-pro`。Pro 失败时不要静默降级。
+- 用户点名 GPT Image、image2 或 `gpt-image-2` 时使用 `image2`。
+- 用户明确要求比较两种结果时使用 `--provider banana,image2`。
+
+文字生图固定调用 Sub2 `/images/generations`，图片修改固定调用 Sub2
+`/images/edits` multipart。只发送 Sub2 别名；不要发送真实 Gemini 上游模型名，
+不要改用 `/chat/completions`，不要直连上游。
+
+常用命令：
+
+```bash
+# 默认生图
 python3 genimg.py "一只戴墨镜的柴犬" --provider banana
 
-# 同时用两个分组出图（各存一张，方便对比）
-python3 genimg.py "赛博朋克城市夜景" --provider banana,image2
-
-# 配置里全部分组
-python3 genimg.py "森林里的小屋" --provider all
-
-# OpenAI Images：显式传递尺寸、质量、数量、透明背景和输出编码
+# GPT Image
 python3 genimg.py "透明底产品图" --provider image2 \
-  --size 1536x1024 --quality high --n 2 \
-  --background transparent --output-format webp
+  --size 1536x1024 --quality high --background transparent
 
-# Banana：使用比例和 K 级分辨率
-python3 genimg.py "竖版电影海报" --provider banana \
-  --aspect-ratio 9:16 --quality 2K
+# 图片编辑
+python3 genimg.py "只把背景改成夜晚城市，保持主体与构图不变" \
+  --provider banana --image ./input.png --out ./output/edited
 
-# 编辑图片：出现 --image 时自动使用 provider 的 edit_mode/edit_endpoint
-python3 genimg.py "只把背景改成夜晚球场，保持人物、服装、姿势和构图不变" \
-  --provider banana --image ./input.png --out ./output/banana-edit
-
-# image2 编辑；多张参考图可重复使用 --image
-python3 genimg.py "保留人物身份与面部特征，把球衣改成蓝白配色" \
-  --provider image2 --image ./input.png --quality high --out ./output/image2-edit
-
-# 带遮罩的局部编辑
-python3 genimg.py "只在透明遮罩区域添加一个足球" \
-  --provider image2 --image ./input.png --mask ./mask.png
-
-# 中转站私有参数，值按 JSON 解析；支持点路径和重复传入
-python3 genimg.py "海报" --provider banana \
-  --param seed=42 --param google.image_config.person_generation=allow_adult
-
-# 只检查最终请求体，不联网
-python3 genimg.py "test" --provider image2 --quality high --dry-run
-
-# 指定输出文件名
-python3 genimg.py "logo" --provider banana --out ./assets/logo
-
-# 查看已配置分组
-python3 genimg.py --list
+# 多张参考图
+python3 genimg.py "保留第一张主体，采用第二张配色" \
+  --provider image2 --image ./subject.png --image ./style.png
 ```
 
-图片默认存到 `./output/<provider>_<时间戳>.<ext>`。
+`--image` 接受本地文件、HTTP(S) URL、Data URL 或纯 Base64，可重复。脚本会把 URL
+下载为图片字节，把 Base64 解码为图片字节，校验文件签名后统一作为 multipart
+文件字段 `image` 上传。不要把 URL 或 Base64 当成普通文本字段发送。使用 `--mask`
+进行局部编辑时，让遮罩与第一张图片保持相同尺寸和格式并包含 alpha 通道。
 
-## 视频任务
+把用户明确提出的尺寸、质量、数量、比例、背景和格式转换为参数，不要只写进提示词：
 
-使用 `genvideo.py` 创建任务、自动轮询并下载 MP4：
+- `--size`、`--quality`、`--n`
+- `--aspect-ratio`
+- `--background`、`--output-format`、`--output-compression`
+- `--mask`
+
+用户没有提出时采用 provider 默认值，不要擅自使用 Pro 或 4K。需要查看全部参数时运行
+`python3 genimg.py --help`。
+
+## 视频工作流
+
+用户要求即梦、Seedance 或视频生成时运行 `genvideo.py`：
 
 ```bash
-# 默认快速版，5 秒、16:9
-python3 genvideo.py "橙色小猫坐在雨夜霓虹屋顶，镜头缓慢推进，电影感" \
-  --model video-ds-2.0-fast \
-  --seconds 5 \
-  --aspect-ratio 16:9 \
-  --out ./output/cat.mp4
+# 默认快速版，创建后持续轮询并下载
+python3 genvideo.py "雨夜城市上空飞行，镜头缓慢推进" \
+  --model video-ds-2.0-fast --seconds 5 --aspect-ratio 16:9 \
+  --out ./output/result.mp4
 
-# 10 秒竖屏视频
-python3 genvideo.py "模特走过未来城市街道，稳定跟拍，无水印" \
-  --seconds 10 --aspect-ratio 9:16 --out ./output/city.mp4
+# 创建后立即返回
+python3 genvideo.py "海边日出" --seconds 10 --no-wait
 
-# 创建任务后立即返回，不等待
-python3 genvideo.py "海边日出延时摄影" --seconds 10 --no-wait
-
-# 中断后续查已有任务；不要重新创建付费任务
+# 续查已有任务，禁止重复创建
 python3 genvideo.py --task-id task_xxx --out ./output/resumed.mp4
 ```
 
-### 本地文件自动上传（推荐）
+默认使用 `video-ds-2.0-fast`；只有用户明确要求标准版时使用 `video-ds-2.0`。任务创建
+成功后立即记录 `task_id`。等待中断或超时后用 `--task-id` 续查，绝不因为中断而重复
+创建付费任务。
 
-视频任务的参考素材需要公网 URL。使用 `--auto-upload` 可自动上传本地文件：
+视频参考图片、视频和音频必须是公网 URL。用户提供本地文件时，先说明文件将上传到
+所选第三方服务并取得同意，再使用 `--auto-upload catbox` 或用户指定的服务。不要在
+未经确认的情况下公开上传本地素材。需要查看全部参数时运行
+`python3 genvideo.py --help`。
 
-```bash
-# 自动上传本地图片到 Catbox（默认推荐，无需配置）
-python3 genvideo.py "让这只橙色小猫飞向天空，保持猫的外观特征" \
-  --seconds 10 \
-  --image ./local-cat.png \
-  --auto-upload catbox \
-  --out ./output/flying-cat.mp4
+## 错误处理与安全
 
-# 支持多个本地文件
-python3 genvideo.py "结合两张图片的元素创作视频" \
-  --seconds 10 \
-  --image ./cat.png \
-  --image ./background.jpg \
-  --auto-upload catbox
-```
+- 对图片请求的 HTTP 429/503 保持原 provider 和模型，按 2、4、8 秒最多重试三次。
+- 原样报告 `model_not_found`、无可用渠道、内容审核和余额不足；不要偷换收费模型。
+- 遇到 `images endpoint requires an image model` 时检查是否误用了真实 Gemini 模型名。
+- 视频创建成功后即使轮询失败也不要重新创建；返回任务 ID并说明续查命令。
+- 仅在排查时使用 `--debug`；不要输出完整 Key、Base64 或 Data URL。
+- 不要把中转 Authorization 头转发给任务返回的第三方对象存储 URL。
+- 图片完成后返回 provider、模型和本地绝对路径。
+- 视频完成后返回任务 ID、模型、时长、输出路径；可用时通过 `ffprobe` 验证媒体。
 
-支持的图床服务：
-- `catbox` - 默认推荐，完全免费，无需配置，最大 200MB
-- `telegraph` - Telegram 官方，最大 5MB，仅图片
-- `smms` - 国内访问快，可匿名，最大 5MB
-- `imgbb` - 需要 API key，无限上传
-
-### 手动上传
-
-也可以先用 `upload.py` 上传，再使用返回的 URL：
-
-```bash
-# 上传文件
-python3 upload.py ./cat.png
-# 输出: https://files.catbox.moe/xxxxx.png
-
-# 使用 URL 创建视频
-python3 genvideo.py "让这只猫飞起来" \
-  --seconds 10 \
-  --image https://files.catbox.moe/xxxxx.png
-```
-
-参考图片、视频和音频都支持本地路径（配合 `--auto-upload`）或公网 URL：
-
-```bash
-python3 genvideo.py "保持参考猫的形象，让它穿披风飞向城市" \
-  --seconds 10 \
-  --image https://example.com/cat.png \
-  --video https://example.com/motion.mp4 \
-  --audio https://example.com/music.mp3 \
-  --auto-upload catbox
-```
-
-## 给 agent 的执行提示
-
-- 用户没指定 provider 时使用 `banana`；用户点名 `banana` 或 `image2` 时严格使用对应 provider，不要覆盖模型或偷换 provider。
-- 用户说「都试试 / 对比」时使用 `--provider banana,image2` 或 `all`。
-- provider 返回 `model_not_found` 或无可用渠道时，原样报告；不要自动改用另一种方式。
-- 不要只把尺寸、比例、张数、透明背景或格式写进 prompt。用户明确提出这些要求时，必须转换成对应 CLI 参数。
-- 用户没提质量/尺寸时不要擅自用 4K；优先采用 provider 的 `defaults`，避免额外费用。
-- OpenAI Images 使用 `--size/--quality/--n/--background/--output-format`。`--response-format` 只适用于 DALL-E 2/3 的 `url|b64_json`，GPT Image 默认返回 base64。
-- 内置 `banana` 使用 `--aspect-ratio` 和 `--quality 1K|2K|4K`；脚本会写入中转站的 `extra_fields.google.image_config`。
-- 内置 `banana` 与 `image2` 都支持图片编辑：传 `--image` 后自动使用 provider 的 `edit_mode` / `edit_endpoint`。banana 使用 Chat 多模态 data-URI；image2 使用 `/images/edits` multipart 的可重复 `image[]`。
-- 编辑提示词要明确列出”改什么”和”必须保持什么”。需要多张参考图时重复 `--image`。局部遮罩 `--mask` 仅用于 `edit_mode=images`（内置 image2）；遮罩应与第一张输入图同尺寸、同格式且带 alpha 通道。
-- `chat` 没有统一的生图参数协议。中转站要求私有字段时用 `--param`，或写在 provider 的 `extra_body`，不要假设 OpenAI Images 参数会自动生效。
-- 请求失败或怀疑参数未生效时先加 `--dry-run` 检查请求体，再用 `--debug` 查看响应。
-- 跑完把保存路径回给用户，并说明实际 provider、model、尺寸/质量等关键参数；若脚本提示参数被忽略，也要明确告知用户。
-- 用户要求视频、即梦、Seedance、文生视频、图生视频或视频续作时，运行 `genvideo.py`，不要用 `genimg.py`。
-- 用户没指定视频模型时使用 `video-ds-2.0-fast`；只有明确要标准版时才使用 `video-ds-2.0`。
-- 视频是付费异步任务。创建成功后立即记录 `task_id` 并持续轮询；中断或超时后使用 `--task-id` 续查，绝不因等待中断而重复创建。
-- 用户指定时长和比例时必须使用 `--seconds` 与 `--aspect-ratio`，不要只写进 prompt。创建前若返回余额不足，报告所需与剩余额度，不重复尝试相同任务。
-- 遇到 `PROVIDER_MODERATION_ERROR` 时原样报告。仅在能保持用户主要视觉意图时，把受限角色名称或标志改写为原创描述并最多重试一次，避免重复扣费。
-- **视频任务的参考素材（--image/--video/--audio）：优先使用 `--auto-upload catbox` 自动上传本地文件。**只有在用户明确提供了公网 URL 时才直接使用 URL。不要要求用户手动上传。
-- 检测到本地文件路径时，自动添加 `--auto-upload catbox` 参数。脚本会自动上传并打印 URL。
-- 上传失败时才提示用户手动上传或使用其他图床服务（telegraph、smms、imgbb）。
-- `/content` 下载失败时让脚本使用任务返回的临时 `video_url` 回退；不要把 API key 转发给第三方对象存储 URL。
-- 视频完成后回报任务 ID、模型、实际时长、分辨率、编码和本地绝对路径；能使用 `ffprobe` 时执行一次媒体校验。
-- 不要把 API key 打印或写进任何文件。
-
-## 参数与 mode
-
-| 参数 | images | gemini | chat |
-|---|---|---|---|
-| `--image, -i` | 使用 provider 的编辑路由，可重复 | 输入图，可重复 | 输入图，可重复 |
-| `--mask` | 编辑遮罩，仅与 `--image` 一起使用 | 不支持 | 不支持 |
-| `--size` | 像素尺寸，如 `1536x1024` | `1K/2K/4K`；比例请优先用下项 | 无通用映射 |
-| `--aspect-ratio` | 中转站 `extra_fields` 扩展 | `1:1/16:9/9:16` 等 | 无通用映射 |
-| `--quality` | `auto/low/medium/high`；中转站也可用 `2K/4K` | `1K/2K/4K`（兼容旧写法） | 无通用映射 |
-| `--n` | 生成 1-10 张 | 仅 1 张 | Chat Completions 的 `n` |
-| `--response-format` | DALL-E 2/3：`url/b64_json` | 无通用映射 | 无通用映射 |
-| `--output-format` | GPT Image：`png/jpeg/webp` | 无通用映射 | 无通用映射 |
-| `--output-compression` | GPT Image JPEG/WEBP：`0-100` | 无通用映射 | 无通用映射 |
-| `--background` | GPT Image：`auto/transparent/opaque` | 无通用映射 | 无通用映射 |
-| `--moderation` | GPT Image：`auto/low` | 无通用映射 | 无通用映射 |
-| `--style` | DALL-E 3：`vivid/natural` | 无通用映射 | 无通用映射 |
-
-通用控制参数：`--provider/-p`、`--mode`、`--edit-mode`、`--model/-m`、`--base-url`、`--endpoint`、`--edit-endpoint`、`--api-key`、`--config`、`--out/-o`、`--outdir`、`--timeout`、`--no-proxy`、`--debug`、`--dry-run`、`--list`。
-
-`--param KEY=VALUE` 会在最后深度合并到请求体。完整优先级为：`--param` > 结构化 CLI 参数 > `defaults` > provider 顶层旧式参数 > `extra_body` > 内置默认。
-
-## 视频参数
-
-| 参数 | 说明 |
-|---|---|
-| `prompt` | 视频内容、动作、镜头、风格与限制 |
-| `--model` | `video-ds-2.0-fast`（默认）或 `video-ds-2.0` |
-| `--seconds` | 时长，例如 `5`、`10`、`15` |
-| `--aspect-ratio` | `16:9`、`9:16`、`1:1` |
-| `--image` | 公网参考图片 URL，可重复 |
-| `--video` | 公网参考视频 URL，可重复 |
-| `--audio` | 公网参考音频 URL，可重复 |
-| `--task-id` | 续查已有任务，不创建新任务 |
-| `--no-wait` | 创建后只返回 task ID |
-| `--poll-interval` | 轮询间隔，默认 15 秒 |
-| `--wait-timeout` | 总等待上限，默认 900 秒 |
-| `--out` | MP4 输出路径 |
-| `--dry-run` | 打印请求，不创建付费任务 |
+完整 CLI 细节以脚本 `--help` 为准。只有需要调整 provider 默认参数时才复制
+`providers.example.json` 为 `providers.json`；不要在其中写入地址或 Key。

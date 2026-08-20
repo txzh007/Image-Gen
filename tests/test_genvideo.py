@@ -1,6 +1,10 @@
+import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import genvideo
 
@@ -30,6 +34,27 @@ class VideoRequestTests(unittest.TestCase):
                 "cat",
                 images=["./cat.png"],
             )
+
+    def test_auto_upload_passes_service_api_key_from_environment(self):
+        calls = []
+        fake_upload = types.SimpleNamespace(
+            upload_file=lambda path, service, api_key: (
+                calls.append((path, service, api_key))
+                or "https://example.com/uploaded.png"
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "input.png"
+            image.write_bytes(b"test")
+            with mock.patch.dict(sys.modules, {"upload": fake_upload}), mock.patch.dict(
+                os.environ, {"IMGBB_API_KEY": "imgbb-test-key"}
+            ):
+                result = genvideo.validate_reference_urls(
+                    "image", [str(image)], auto_upload="imgbb"
+                )
+
+        self.assertEqual(["https://example.com/uploaded.png"], result)
+        self.assertEqual([(str(image), "imgbb", "imgbb-test-key")], calls)
 
     def test_extract_task_id_accepts_both_shapes(self):
         self.assertEqual("task-a", genvideo.extract_task_id({"task_id": "task-a"}))

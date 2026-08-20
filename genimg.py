@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-genimg — 通用生图 CLI，供 Claude Code / Codex / OpenCode 等 agent 直接调用。
+genimg — 跨平台 Sub2API 图片 CLI，供 Claude Code / Codex / OpenCode 等 agent 调用。
 
 特点：
-  * 零第三方依赖（仅 Python3 标准库），无需 pip install。
-  * 多中转站/多分组：一个 provider 一条配置，可同时对多个 provider 生图。
-  * 格式无关：请求支持 chat | images | gemini 三种模式；响应用"万能解析器"
-    自动从任意 JSON 结构里提取图片（url / base64 / markdown图链 / inlineData）。
-  * --debug 打印真实返回结构，方便确认你中转站到底是什么格式。
+  * 零第三方依赖（仅 Python 3 标准库），兼容 Windows、macOS、Linux。
+  * 只通过 Sub2 OpenAI Images 兼容接口生成和编辑图片。
+  * 本地文件、URL、Data URL、Base64 统一转为内存 multipart 文件。
+  * 自动解析 data[].url 与 data[].b64_json，并对调试输出去敏。
 
 用法示例：
   python genimg.py "一只戴墨镜的柴犬" --provider banana
@@ -19,6 +18,7 @@ genimg — 通用生图 CLI，供 Claude Code / Codex / OpenCode 等 agent 直�
 
 import argparse
 import base64
+import binascii
 import datetime as _dt
 import json
 import mimetypes
@@ -26,19 +26,16 @@ import os
 import re
 import secrets
 import sys
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 CONFIG_NAMES = ["providers.json", "providers.local.json", "providers.example.json"]
-DEFAULT_EDIT_ENDPOINT = "/images/edits"
-
-DEFAULT_ENDPOINT = {
-    "chat": "/chat/completions",
-    "images": "/images/generations",
-    "gemini": "/v1beta/models/{model}:generateContent",
-}
+GENERATION_ENDPOINT = "/images/generations"
+EDIT_ENDPOINT = "/images/edits"
 
 REQUEST_OPTION_NAMES = (
     "size",
@@ -55,8 +52,44 @@ REQUEST_OPTION_NAMES = (
 )
 
 GEMINI_IMAGE_SIZES = {"0.5K", "512", "1K", "2K", "4K"}
+DEFAULT_SUB2_IMAGE_MODEL = "gpt-image-gemini-flash"
+ALLOWED_SUB2_IMAGE_MODELS = {
+    "gpt-image-gemini-flash",
+    "gpt-image-gemini-pro",
+    "gpt-image-2",
+}
+SUB2_MODEL_ALIASES = {
+    "gemini-3.1-flash-image": "gpt-image-gemini-flash",
+    "gemini-3-pro-image": "gpt-image-gemini-pro",
+}
+RETRYABLE_HTTP_STATUSES = {429, 503}
+RETRY_DELAYS = (2, 4, 8)
+MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024
+RASTER_MIME_BY_EXT = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+}
 
 # ----------------------------------------------------------------------------- config
+
+def normalize_sub2_model(model):
+    """把已知 Gemini 上游名固定映射为 Sub2API image 别名。"""
+    return SUB2_MODEL_ALIASES.get(model, model)
+
+
+def validate_sub2_model(model):
+    """确保发往 Sub2 Images API 的模型是允许的兼容别名。"""
+    normalized = normalize_sub2_model(model)
+    if normalized not in ALLOWED_SUB2_IMAGE_MODELS:
+        allowed = "、".join(sorted(ALLOWED_SUB2_IMAGE_MODELS))
+        raise ValueError(f"不支持的图片模型 '{model}'；只能使用：{allowed}。")
+    return normalized
 
 def load_config(explicit=None):
     """按优先级找配置文件：--config 指定 > 当前目录 > 脚本目录。"""
@@ -76,29 +109,29 @@ def load_config(explicit=None):
 
 
 def resolve_provider(name, config, args):
-    """合并配置：CLI 参数 > 环境变量 > 配置文件 > 内置默认。"""
+    """合并 provider 配置；地址和 Key 只从旧版环境变量读取。"""
     cfg = dict(config.get(name, {}))
-    base_url = args.base_url or os.environ.get("IMAGE_API_BASE") or cfg.get("base_url")
-    mode = args.mode or cfg.get("mode") or "chat"
-    model = args.model or cfg.get("model") or name
-    endpoint = args.endpoint or cfg.get("endpoint") or DEFAULT_ENDPOINT.get(mode, "/chat/completions")
-    edit_mode = args.edit_mode or cfg.get("edit_mode") or mode
-    edit_default_endpoint = (
-        DEFAULT_EDIT_ENDPOINT if edit_mode == "images"
-        else DEFAULT_ENDPOINT.get(edit_mode, "/chat/completions")
-    )
-    edit_endpoint = args.edit_endpoint or cfg.get("edit_endpoint") or edit_default_endpoint
+    image_api_base = os.environ.get("IMAGE_API_BASE")
+    api_key = os.environ.get("GENIMG_API_KEY")
+    if not image_api_base:
+        raise ValueError("缺少 IMAGE_API_BASE（必须包含并以 /v1 结尾）。")
+    if not image_api_base.rstrip("/").endswith("/v1"):
+        raise ValueError("IMAGE_API_BASE 必须包含并以 /v1 结尾。")
+    if not api_key and not getattr(args, "dry_run", False):
+        raise ValueError("缺少 GENIMG_API_KEY。")
 
-    key_env = cfg.get("api_key_env", "IMAGE_API_KEY")
-    api_key = (
-        args.api_key
-        or os.environ.get(key_env)
-        or os.environ.get("IMAGE_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
+    model = args.model or cfg.get("model") or (
+        DEFAULT_SUB2_IMAGE_MODEL if name == "banana" else name
     )
-    if not base_url:
+    model = validate_sub2_model(model)
+    if (
+        name == "banana"
+        and model == "gpt-image-gemini-pro"
+        and not args.model
+    ):
         raise ValueError(
-            f"provider '{name}' 缺少 base_url。请在 providers.json 里配置，或用 --base-url 指定。"
+            "banana 的 Pro 模型必须由用户明确指定："
+            "--model gpt-image-gemini-pro。"
         )
     defaults = cfg.get("defaults", {})
     if defaults is None:
@@ -133,12 +166,8 @@ def resolve_provider(name, config, args):
 
     return {
         "name": name,
-        "base_url": base_url,
-        "mode": mode,
-        "edit_mode": edit_mode,
+        "base_url": image_api_base,
         "model": model,
-        "endpoint": endpoint,
-        "edit_endpoint": edit_endpoint,
         "api_key": api_key,
         "request_options": request_options,
         "extra_body": provider_extra_body,
@@ -146,15 +175,14 @@ def resolve_provider(name, config, args):
 
 # ----------------------------------------------------------------------------- http
 
-def join_url(base, endpoint, model):
+def join_url(base, endpoint):
     base = base.rstrip("/")
-    endpoint = (endpoint or "").format(model=model)
     if not endpoint.startswith("/"):
         endpoint = "/" + endpoint
     return base + endpoint
 
 
-def build_headers(mode, api_key, content_type="application/json"):
+def build_headers(api_key, content_type="application/json"):
     is_multipart = content_type.startswith("multipart/form-data")
     h = {
         "Content-Type": content_type,
@@ -169,8 +197,6 @@ def build_headers(mode, api_key, content_type="application/json"):
     }
     if api_key:
         h["Authorization"] = f"Bearer {api_key}"
-        if mode == "gemini":
-            h["x-goog-api-key"] = api_key
     return h
 
 
@@ -201,18 +227,141 @@ def http_post_bytes(url, headers, data, timeout):
         return e.code, e.read()
 
 
+def post_with_retries(post_once, label="request", delays=RETRY_DELAYS, sleep_fn=time.sleep):
+    """仅对 429/503 退避重试；不切换 provider 或模型。"""
+    status, raw = post_once()
+    for delay in delays:
+        if status not in RETRYABLE_HTTP_STATUSES:
+            break
+        print(f"[{label}] HTTP {status}，{delay} 秒后重试（保持原模型）")
+        sleep_fn(delay)
+        status, raw = post_once()
+    return status, raw
+
+
 def http_get_bytes(url, timeout):
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
-# ----------------------------------------------------------------------------- request builders
 
-def file_to_data_uri(path):
-    mime = mimetypes.guess_type(path)[0] or "image/png"
-    with open(path, "rb") as f:
-        b = base64.b64encode(f.read()).decode("ascii")
-    return f"data:{mime};base64,{b}", mime, b
+def sniff_input_mime(raw):
+    """根据文件签名识别常见栅格图片 MIME。"""
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if raw[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if raw[:2] == b"BM":
+        return "image/bmp"
+    if raw[:4] in (b"II*\x00", b"MM\x00*"):
+        return "image/tiff"
+    return None
+
+
+def _validated_image_upload(raw, filename, declared_mime=None, source="input"):
+    if not raw:
+        raise ValueError(f"输入图片为空：{source}")
+    if len(raw) > MAX_IMAGE_INPUT_BYTES:
+        raise ValueError(f"输入图片超过 20MB：{source}")
+    detected_mime = sniff_input_mime(raw)
+    if not detected_mime:
+        raise ValueError(f"输入内容不是受支持的栅格图片：{source}")
+    if declared_mime and not declared_mime.lower().startswith("image/"):
+        raise ValueError(f"图片 MIME 类型无效：{declared_mime}")
+    safe_name = (filename or "input").replace('"', "_")
+    ext = Path(safe_name).suffix.lower()
+    if not ext or RASTER_MIME_BY_EXT.get(ext) != detected_mime:
+        ext_by_mime = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/webp": ".webp",
+            "image/gif": ".gif",
+            "image/bmp": ".bmp",
+            "image/tiff": ".tiff",
+        }
+        safe_name = Path(safe_name).stem + ext_by_mime[detected_mime]
+    return {
+        "filename": safe_name,
+        "mime": detected_mime,
+        "data": raw,
+        "source": source,
+    }
+
+
+def load_image_input(value, timeout=60):
+    """把本地文件、Base64、Data URL 或公网 URL 转成内存文件。"""
+    value = str(value)
+    if value.startswith("data:"):
+        try:
+            header, encoded = value.split(",", 1)
+            mime, encoding = header[5:].split(";", 1)
+            if encoding.lower() != "base64":
+                raise ValueError("Data URL 必须使用 base64 编码。")
+            raw = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError(f"无效的图片 Data URL：{exc}") from exc
+        return _validated_image_upload(raw, "input", mime, source="data-url")
+
+    if re.match(r"^https?://", value, re.I):
+        req = urllib.request.Request(
+            value,
+            headers={"Accept": "image/*", "User-Agent": "Image-Gen/1.0"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                declared_mime = resp.headers.get_content_type()
+                raw = resp.read(MAX_IMAGE_INPUT_BYTES + 1)
+                final_url = resp.geturl()
+        except urllib.error.URLError as exc:
+            raise ValueError(f"下载图片 URL 失败：{exc}") from exc
+        filename = Path(urllib.parse.urlparse(final_url).path).name or "input"
+        return _validated_image_upload(raw, filename, declared_mime, source="url")
+
+    try:
+        path = Path(value)
+        if path.is_file():
+            raw = path.read_bytes()
+            declared_mime = mimetypes.guess_type(path.name)[0]
+            return _validated_image_upload(raw, path.name, declared_mime, source="local-file")
+    except OSError:
+        # 很长的 Base64 字符串不是文件路径；继续按 Base64 解码。
+        pass
+
+    try:
+        raw = base64.b64decode(re.sub(r"\s+", "", value), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError(
+            "--image 必须是本地图片路径、图片 URL、Data URL 或有效 Base64。"
+        ) from exc
+    return _validated_image_upload(raw, "input", source="base64")
+
+
+def describe_image_input(value):
+    """为 dry-run/debug 描述输入，绝不返回 Base64 或图片字节。"""
+    value = str(value)
+    if value.startswith("data:"):
+        return {"source": "data-url", "content": "<omitted>"}
+    if re.match(r"^https?://", value, re.I):
+        filename = Path(urllib.parse.urlparse(value).path).name or "input"
+        return {"source": "url", "filename": filename, "url": "<omitted>"}
+    try:
+        path = Path(value)
+        if path.is_file():
+            return {
+                "source": "local-file",
+                "filename": path.name,
+                "bytes": path.stat().st_size,
+            }
+    except OSError:
+        pass
+    return {"source": "base64", "content": "<omitted>"}
+
+# ----------------------------------------------------------------------------- request builders
 
 
 def deep_merge(base, override):
@@ -271,6 +420,7 @@ def _relay_extra_fields(options):
 
 def build_edit_fields(model, prompt, options=None, extra_body=None):
     """构建 OpenAI-compatible /images/edits 的 multipart 文本字段。"""
+    model = validate_sub2_model(model)
     options = dict(options or {})
     extra_body = dict(extra_body or {})
     fields = {"model": model, "prompt": prompt, "n": options.get("n", 1)}
@@ -302,7 +452,7 @@ def _multipart_text(value):
 
 
 def build_multipart(fields, images, mask=None):
-    """把文本字段和本地图片编码为 multipart/form-data。"""
+    """把文本字段和内存图片编码为 multipart/form-data。"""
     boundary = "----genimg-" + secrets.token_hex(16)
     chunks = []
 
@@ -318,122 +468,53 @@ def build_multipart(fields, images, mask=None):
         add_line()
         add_line(_multipart_text(value))
 
-    file_items = [("image[]", path) for path in images]
+    file_items = [("image", item) for item in images]
     if mask:
         file_items.append(("mask", mask))
-    for field_name, raw_path in file_items:
-        path = Path(raw_path)
-        if not path.is_file():
-            raise ValueError(f"输入图片不存在或不是文件：{path}")
-        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        safe_name = path.name.replace('"', "_")
+    for field_name, item in file_items:
+        safe_name = item["filename"].replace('"', "_")
         add_line(f"--{boundary}")
         add_line(
             f'Content-Disposition: form-data; name="{field_name}"; filename="{safe_name}"'
         )
-        add_line(f"Content-Type: {mime}")
+        add_line(f"Content-Type: {item['mime']}")
         add_line()
-        add_line(path.read_bytes())
+        add_line(item["data"])
 
     add_line(f"--{boundary}--")
     return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
-def build_body(mode, model, prompt, images, options=None, extra_body=None):
+def build_generation_body(model, prompt, options=None, extra_body=None):
+    """构建 Sub2 OpenAI-compatible /images/generations JSON 请求。"""
+    model = validate_sub2_model(model)
     options = dict(options or {})
     extra_body = dict(extra_body or {})
-    ignored = []
+    body = {"model": model, "prompt": prompt, "n": options.get("n", 1)}
 
-    if mode == "chat":
-        if images:
-            content = [{"type": "text", "text": prompt}]
-            for img in images:
-                uri, _, _ = file_to_data_uri(img)
-                content.append({"type": "image_url", "image_url": {"url": uri}})
-        else:
-            content = prompt
-        body = {"model": model, "messages": [{"role": "user", "content": content}], "stream": False}
-        if options.get("n") not in (None, 1):
-            body["n"] = options["n"]
-        for name in (
-            "size", "quality", "response_format", "aspect_ratio", "output_format",
-            "output_compression", "background", "moderation", "style", "user",
-        ):
-            if options.get(name) is not None:
-                ignored.append(name)
-        return deep_merge(extra_body, body), ignored
+    if options.get("output_compression") is not None and options.get(
+        "output_format"
+    ) not in ("jpeg", "webp"):
+        raise ValueError("output_compression 只适用于 output_format=jpeg 或 webp。")
+    for name in (
+        "size",
+        "quality",
+        "response_format",
+        "output_format",
+        "output_compression",
+        "background",
+        "moderation",
+        "style",
+        "user",
+    ):
+        if options.get(name) is not None:
+            body[name] = options[name]
 
-    if mode == "images":
-        if images:
-            raise ValueError(
-                "images mode 的图片编辑应由 /images/edits multipart 流程处理，"
-                "不能调用 build_body 构建 JSON 请求。"
-            )
-        body = {"model": model, "prompt": prompt, "n": options.get("n", 1)}
-        if "dall-e-3" in model.lower() and body["n"] != 1:
-            raise ValueError("DALL-E 3 仅支持 n=1。")
-        if options.get("output_compression") is not None and options.get("output_format") not in (
-            "jpeg", "webp",
-        ):
-            raise ValueError("output_compression 只适用于 output_format=jpeg 或 webp。")
-        for name in (
-            "size", "quality", "response_format", "output_format", "output_compression",
-            "background", "moderation", "style", "user",
-        ):
-            if options.get(name) is not None:
-                body[name] = options[name]
-
-        # aspect_ratio 与 K 级分辨率不是 OpenAI 标准字段，但保留项目原有的
-        # extra_fields 中转站扩展协议。
-        extra = _relay_extra_fields(options)
-        if extra:
-            body["extra_fields"] = extra
-        return deep_merge(extra_body, body), ignored
-
-    if mode == "gemini":
-        parts = [{"text": prompt}]
-        for img in images or []:
-            _, mime, b = file_to_data_uri(img)
-            parts.append({"inline_data": {"mime_type": mime, "data": b}})
-        body = {"contents": [{"parts": parts}]}
-        generation_config = {"responseModalities": ["IMAGE"]}
-        image_config = {}
-
-        aspect_ratio = options.get("aspect_ratio")
-        size = options.get("size")
-        quality = options.get("quality")
-        if aspect_ratio:
-            image_config["aspectRatio"] = aspect_ratio
-        elif isinstance(size, str) and ":" in size:
-            image_config["aspectRatio"] = size
-        elif size is not None and str(size).upper() not in GEMINI_IMAGE_SIZES:
-            ignored.append("size")
-
-        image_size = None
-        if isinstance(quality, str) and quality.upper() in GEMINI_IMAGE_SIZES:
-            image_size = quality.upper()
-        elif isinstance(size, str) and size.upper() in GEMINI_IMAGE_SIZES:
-            image_size = size.upper()
-        elif quality is not None:
-            ignored.append("quality")
-        if image_size:
-            image_config["imageSize"] = image_size
-
-        if image_config:
-            generation_config["responseFormat"] = {"image": image_config}
-        body["generationConfig"] = generation_config
-
-        for name in (
-            "response_format", "output_format", "output_compression", "background",
-            "moderation", "style", "user",
-        ):
-            if options.get(name) is not None:
-                ignored.append(name)
-        if options.get("n") not in (None, 1):
-            ignored.append("n")
-        return deep_merge(extra_body, body), ignored
-
-    raise ValueError(f"未知 mode: {mode}（可选 chat | images | gemini）")
+    # aspect_ratio 与 K 级分辨率通过中转站 extra_fields 扩展发送。
+    extra = _relay_extra_fields(options)
+    if extra:
+        body["extra_fields"] = extra
+    return deep_merge(extra_body, body)
 
 # ----------------------------------------------------------------------------- 万能响应解析
 
@@ -465,7 +546,7 @@ def _walk(node, found, parent_key):
                 found.append(("b64", v["data"]))
             elif kl == "data" and isinstance(v, str) and parent_key in ("inline_data", "inlinedata"):
                 found.append(("b64", v))
-            elif kl == "url" and isinstance(v, str):
+            elif kl == "url" and isinstance(v, str) and v.strip():
                 if v.startswith("data:image"):
                     m = DATA_URI_RE.search(v)
                     if m:
@@ -523,13 +604,34 @@ def save_image(kind, payload, out_base, timeout):
 
 # ----------------------------------------------------------------------------- debug
 
-def sanitize(obj, limit=180):
+def redact_text(value, secrets_to_hide=()):
+    text = str(value)
+    for secret in secrets_to_hide:
+        if secret:
+            text = text.replace(secret, "***REDACTED***")
+    return text
+
+
+def sanitize(obj, limit=180, secrets_to_hide=()):
     if isinstance(obj, dict):
-        return {k: sanitize(v, limit) for k, v in obj.items()}
+        out = {}
+        for key, value in obj.items():
+            if str(key).lower() in {"api_key", "apikey", "authorization", "x-api-key"}:
+                out[key] = "***REDACTED***"
+            else:
+                out[key] = sanitize(value, limit, secrets_to_hide)
+        return out
     if isinstance(obj, list):
-        return [sanitize(v, limit) for v in obj]
-    if isinstance(obj, str) and len(obj) > limit:
-        return obj[:limit] + f"...<+{len(obj) - limit} chars>"
+        return [sanitize(v, limit, secrets_to_hide) for v in obj]
+    if isinstance(obj, str):
+        obj = redact_text(obj, secrets_to_hide)
+        if obj.startswith("data:image") and ";base64," in obj[:128]:
+            return "<data-url omitted>"
+        compact = re.sub(r"\s+", "", obj)
+        if len(compact) > 256 and re.fullmatch(r"[A-Za-z0-9+/=]+", compact):
+            return f"<base64 omitted: {len(compact)} chars>"
+        if len(obj) > limit:
+            return obj[:limit] + f"...<+{len(obj) - limit} chars>"
     return obj
 
 # ----------------------------------------------------------------------------- 单 provider 执行
@@ -537,14 +639,12 @@ def sanitize(obj, limit=180):
 def run_one(prov, prompt, args, single_target=True):
     label = prov["name"]
     is_edit = bool(args.image)
-    request_mode = prov["edit_mode"] if is_edit else prov["mode"]
-    request_endpoint = prov["edit_endpoint"] if is_edit else prov["endpoint"]
-    is_multipart_edit = is_edit and request_mode == "images"
-    if args.mask and not is_multipart_edit:
-        raise ValueError("--mask 只能与 edit_mode=images 的 --image 编辑请求一起使用。")
+    request_endpoint = EDIT_ENDPOINT if is_edit else GENERATION_ENDPOINT
+    if args.mask and not is_edit:
+        raise ValueError("--mask 只能与 --image 图片编辑一起使用。")
 
-    if is_multipart_edit:
-        url = join_url(prov["base_url"], request_endpoint, prov["model"])
+    if is_edit:
+        url = join_url(prov["base_url"], request_endpoint)
         fields = build_edit_fields(
             prov["model"], prompt,
             options=prov["request_options"],
@@ -552,50 +652,93 @@ def run_one(prov, prompt, args, single_target=True):
         )
         # --param 在编辑请求中覆盖 multipart 文本字段。
         fields = deep_merge(fields, args.param_body)
-        request_data, content_type = build_multipart(fields, args.image, args.mask)
-        headers = build_headers(request_mode, prov["api_key"], content_type)
-        ignored = []
+        if "model" in fields:
+            fields["model"] = validate_sub2_model(fields["model"])
+            if (
+                prov["name"] == "banana"
+                and fields["model"] == "gpt-image-gemini-pro"
+                and not args.model
+            ):
+                raise ValueError("banana 的 Pro 模型必须由用户明确指定 --model。")
+        if args.dry_run:
+            request_data = None
+            content_type = "multipart/form-data; boundary=<generated-at-send-time>"
+            prepared_images = []
+            prepared_mask = None
+            input_debug = [describe_image_input(value) for value in args.image]
+            mask_debug = describe_image_input(args.mask) if args.mask else None
+        else:
+            prepared_images = [load_image_input(value, args.timeout) for value in args.image]
+            prepared_mask = load_image_input(args.mask, args.timeout) if args.mask else None
+            request_data, content_type = build_multipart(
+                fields, prepared_images, prepared_mask
+            )
+            input_debug = [
+                {
+                    "source": item["source"],
+                    "filename": item["filename"],
+                    "mime": item["mime"],
+                    "bytes": len(item["data"]),
+                }
+                for item in prepared_images
+            ]
+            mask_debug = (
+                {
+                    "source": prepared_mask["source"],
+                    "filename": prepared_mask["filename"],
+                    "mime": prepared_mask["mime"],
+                    "bytes": len(prepared_mask["data"]),
+                }
+                if prepared_mask else None
+            )
+        headers = build_headers(prov["api_key"], content_type)
         debug_body = {
             "fields": fields,
-            "image[]": [str(Path(path)) for path in args.image],
-            "mask": str(Path(args.mask)) if args.mask else None,
+            "image": input_debug,
+            "mask": mask_debug,
         }
     else:
-        url = join_url(prov["base_url"], request_endpoint, prov["model"])
-        headers = build_headers(request_mode, prov["api_key"])
-        body, ignored = build_body(
-            request_mode, prov["model"], prompt, args.image,
+        url = join_url(prov["base_url"], request_endpoint)
+        headers = build_headers(prov["api_key"])
+        body = build_generation_body(
+            prov["model"], prompt,
             options=prov["request_options"],
             extra_body=prov["extra_body"],
         )
         # --param 是显式的低层请求体覆盖，优先级高于所有结构化参数。
         body = deep_merge(body, args.param_body)
+        if "model" in body:
+            body["model"] = validate_sub2_model(body["model"])
+            if (
+                prov["name"] == "banana"
+                and body["model"] == "gpt-image-gemini-pro"
+                and not args.model
+            ):
+                raise ValueError("banana 的 Pro 模型必须由用户明确指定 --model。")
         debug_body = body
 
     operation = "edit" if is_edit else "generate"
     print(
         f"[{label}] POST {url}  "
-        f"(mode={request_mode}, operation={operation}, model={prov['model']})"
+        f"(operation={operation}, model={prov['model']})"
     )
-    if ignored:
-        print(
-            f"[{label}] ⚠ mode={request_mode} 没有通用映射，已忽略: {', '.join(sorted(set(ignored)))}；"
-            "中转站自定义字段请用 --param key=value"
-        )
-    if not prov["api_key"]:
-        print(f"[{label}] ⚠ 未找到 API key（设置环境变量 IMAGE_API_KEY 或用 --api-key）")
-
     if args.debug or args.dry_run:
         print(f"[{label}] 请求参数:")
-        print(json.dumps(sanitize(debug_body), ensure_ascii=False, indent=2))
+        print(json.dumps(sanitize(debug_body, secrets_to_hide=(prov["api_key"],)), ensure_ascii=False, indent=2))
     if args.dry_run:
         print(f"[{label}] ✓ dry-run，未发送网络请求")
         return []
 
-    if is_multipart_edit:
-        status, raw = http_post_bytes(url, headers, request_data, args.timeout)
+    if is_edit:
+        status, raw = post_with_retries(
+            lambda: http_post_bytes(url, headers, request_data, args.timeout),
+            label=label,
+        )
     else:
-        status, raw = http_post_json(url, headers, body, args.timeout)
+        status, raw = post_with_retries(
+            lambda: http_post_json(url, headers, body, args.timeout),
+            label=label,
+        )
 
     try:
         parsed = json.loads(raw.decode("utf-8"))
@@ -605,13 +748,18 @@ def run_one(prov, prompt, args, single_target=True):
     if args.debug:
         print(f"[{label}] HTTP {status}")
         if parsed is not None:
-            print(json.dumps(sanitize(parsed), ensure_ascii=False, indent=2))
+            print(json.dumps(sanitize(parsed, secrets_to_hide=(prov["api_key"],)), ensure_ascii=False, indent=2))
         else:
-            print(raw.decode("utf-8", "replace")[:2000])
+            print(redact_text(raw.decode("utf-8", "replace")[:2000], (prov["api_key"],)))
 
     if status >= 300:
-        snippet = raw.decode("utf-8", "replace")[:500]
+        snippet = redact_text(raw.decode("utf-8", "replace")[:500], (prov["api_key"],))
         print(f"[{label}] ✗ 请求失败 HTTP {status}: {snippet}")
+        if status == 400 and "images endpoint requires an image model" in snippet.lower():
+            print(
+                f"[{label}] 检查 model：Sub2API Gemini 必须使用 "
+                "gpt-image-gemini-flash 或 gpt-image-gemini-pro，不能发送原始 Gemini 模型名。"
+            )
         return []
 
     if parsed is None:
@@ -620,7 +768,7 @@ def run_one(prov, prompt, args, single_target=True):
 
     images = extract_images(parsed)
     if not images:
-        print(f"[{label}] ✗ 没在返回里找到图片。用 --debug 看结构，可能要换 --mode。")
+        print(f"[{label}] ✗ 没在返回里找到图片。用 --debug 查看响应结构。")
         return []
 
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -644,27 +792,19 @@ def run_one(prov, prompt, args, single_target=True):
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="genimg",
-        description="通用生图 CLI：多中转站/多分组，格式无关。",
+        description="跨平台 Sub2API 图片生成与编辑 CLI。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("prompt", nargs="?", help="生图提示词")
     p.add_argument("--provider", "-p", default="banana",
                    help="provider 名，逗号分隔可同时多个；'all' 表示配置里全部。默认 banana")
     p.add_argument("--image", "-i", action="append", default=[],
-                   help="输入图（图生图/编辑），可多次；自动使用 provider 的编辑路由")
+                   help="输入图：本地路径、图片 URL、Data URL 或 Base64；可重复")
     p.add_argument("--mask", help="编辑遮罩图；仅与 images mode 的 --image 一起使用")
     p.add_argument("--out", "-o", help="单张输出时的文件名")
     p.add_argument("--outdir", default="output", help="输出目录，默认 ./output")
     p.add_argument("--model", "-m", help="覆盖模型名")
-    p.add_argument("--base-url", dest="base_url", help="覆盖中转站 base_url")
-    p.add_argument("--mode", choices=["chat", "images", "gemini"], help="覆盖请求模式")
-    p.add_argument("--edit-mode", dest="edit_mode", choices=["chat", "images", "gemini"],
-                   help="覆盖传入 --image 时使用的请求模式")
-    p.add_argument("--endpoint", help="覆盖请求路径，可含 {model}")
-    p.add_argument("--edit-endpoint", dest="edit_endpoint",
-                   help="覆盖图片编辑请求路径")
-    p.add_argument("--api-key", dest="api_key", help="覆盖 API key")
-    p.add_argument("--size", help="尺寸，如 1024x1024（images）或 1K/2K/4K（gemini）")
+    p.add_argument("--size", help="尺寸，如 1024x1024 或 1536x1024")
     p.add_argument("--quality", help="质量，如 auto、low、high、2K、4K")
     p.add_argument("--response-format", dest="response_format", choices=["url", "b64_json"],
                    help="返回格式（DALL-E 2/3）：url 或 b64_json")
@@ -712,7 +852,7 @@ def main(argv=None):
                 defaults = json.dumps(c.get("defaults", {}), ensure_ascii=False)
                 print(
                     f"  - {name}: mode={c.get('mode')}, model={c.get('model')}, "
-                    f"base={c.get('base_url')}, defaults={defaults}"
+                    f"defaults={defaults}"
                 )
         return 0
 

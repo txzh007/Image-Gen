@@ -15,8 +15,8 @@ genimg_usage() {
     bash configure-macos.sh --dry-run
 
 配置项：
-  IMAGE_API_BASE  中转站 OpenAI 兼容 API 地址，通常以 /v1 结尾
-  GENIMG_API_KEY  中转站 API key；实际运行时存入 macOS Keychain
+  IMAGE_API_BASE  Sub2API OpenAI 兼容地址，必须包含 /v1
+  GENIMG_API_KEY  Sub2API key；实际运行时存入 macOS Keychain
 
 选项：
   --dry-run       只检查将要执行的操作，不写文件或 Keychain
@@ -68,6 +68,14 @@ case "$genimg_base_url" in
         ;;
 esac
 genimg_base_url="${genimg_base_url%/}"
+case "$genimg_base_url" in
+    */v1)
+        ;;
+    *)
+        echo "IMAGE_API_BASE 必须包含并以 /v1 结尾。" >&2
+        exit 1
+        ;;
+esac
 
 genimg_api_key="${GENIMG_API_KEY:-}"
 genimg_has_keychain_key=0

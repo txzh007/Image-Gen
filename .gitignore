@@ -3,6 +3,9 @@ providers.json
 providers.local.json
 .env
 .DS_Store
+.env.*
+.venv/
+venv/
 
 # 输出图片与视频
 output/
@@ -18,3 +21,5 @@ output/
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
+.coverage
