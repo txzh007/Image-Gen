@@ -1,122 +1,360 @@
 ---
 name: genimg
-description: 通过 Sub2API 生成和编辑图片、创建和续查异步视频任务。用户要求生图、画图、文生图、图生图、图片编辑、Gemini 图片、GPT Image、即梦视频、Seedance、文生视频、图生视频或视频续作时使用。
+description: 通过用户自备的 OpenAI Images 兼容中转（IMAGE_API_BASE + GENIMG_API_KEY）生成和编辑图片，并创建、续查异步视频任务。用户提出生图、画图、出图、改图、修图、换背景、加文字、扩图、做海报/头像/封面/商品图/透明底、文生图、图生图、参考图风格迁移、Nano Banana、Gemini 图片、GPT Image、image2，或要求即梦、Seedance、文生视频、图生视频、视频续作时使用。
 ---
 
 # genimg
 
-使用本目录中的零依赖 Python 3 脚本：
+三个零依赖 Python 3 脚本，全部通过用户自己的 Sub2 中转调用，不接触上游 Key：
 
-- `genimg.py`：生成或编辑图片。
-- `genvideo.py`：创建、轮询、续查并下载视频任务。
-- `upload.py`：经用户同意后，把视频参考素材上传到第三方图床。
+| 脚本 | 用途 |
+|---|---|
+| `genimg.py` | 文字生图、图片编辑、多图参考、遮罩局部重绘、批量提示词 |
+| `genvideo.py` | 创建、轮询、续查、下载异步视频任务 |
+| `upload.py` | 把本地素材传到第三方图床（需用户同意） |
 
-在运行命令时使用 Skill 目录中的脚本绝对路径；不要假设当前工作目录就是 Skill
-目录。让输出路径指向用户当前工作目录或用户明确指定的位置。
+调用时用 Skill 目录里的**脚本绝对路径**：下文所有 `genimg.py` / `genvideo.py` 都应理解为
+`<本文件所在目录>/genimg.py`，不要假设 cwd 就是 Skill 目录；输出路径指向用户当前工作目录
+或用户指定位置。
+
+## 先确认能不能用（30 秒，免费）
+
+刚接触这个 skill、或换了中转/Key 时，先跑这一条再谈生图：
+
+```bash
+python3 "<本 skill 目录>/genimg.py" --list-models
+```
+
+它只查 `/v1/models`，**不生成图片、不产生费用**。按输出判断：
+
+| 输出 | 含义 | 下一步 |
+|---|---|---|
+| 列出若干生图模型（含 `← 已知`） | 完全可用 | 直接进图片工作流 |
+| `未设置 IMAGE_API_BASE…` | 没配中转地址 | 见下方「配置」，让用户提供地址与 Key |
+| `拉取模型列表失败：HTTP 401/403` | Key 无效或不属于该中转 | 让用户换 Key，不要反复重试 |
+| `拉取模型列表失败：HTTP 404` | 该中转没有 /models 端点 | 不阻塞出图：跳过自动择优，用 `--no-discover --model NAME` |
+| 其它网络错误 | 中转不可达或被代理拦截 | 检查地址，必要时 `--no-proxy` |
+
+拿不到模型列表也不必停：生图主链路不依赖它，`--no-discover` 会用配置默认模型直接发。
 
 ## 配置
 
-只从环境变量读取中转地址和用户 Key：
+只从环境变量读取中转地址与用户 Key：
 
 ```bash
-export IMAGE_API_BASE="https://你的中转站/v1"
+export IMAGE_API_BASE="https://你的中转站/v1"   # 必须以 /v1 结尾
 export GENIMG_API_KEY="sk-xxx"
 ```
 
-要求 `IMAGE_API_BASE` 以 `/v1` 结尾。只使用 `IMAGE_API_BASE` 和
-`GENIMG_API_KEY`，不要读取配置文件 Key 或上游 Key，
-不要使用已禁用的 `--base-url`、`--api-key`、`--endpoint`、`--edit-endpoint` 绕过
-中转。首次使用时可以执行不产生费用的检查：
+不读取配置文件里的地址/Key，不读取上游 Key，不使用 `--base-url`、`--api-key` 绕开
+中转（`genvideo.py` 传这两个参数会直接报错退出）。
+
+**Windows**：把示例里的 `python3` 换成 `python`；终端显示乱码时先 `chcp 65001` 或用
+Windows Terminal。三个脚本已统一 stdout/stderr 为 UTF-8 并对不可编码字符降级，不会因代码页
+中断，可以放心跑。
+
+自检分两种，别混：`--dry-run` **不联网**，只能检查参数拼写，验证不了 Key；要验证 Key 必须
+用 `--list-models`（免费）。
 
 ```bash
-python3 genimg.py "配置检查" --provider banana --dry-run
-python3 genvideo.py "配置检查" --dry-run
+python3 genimg.py --list-models            # 真验证：能看到模型列表 = 地址和 Key 都对
+python3 genimg.py "x" --provider banana --dry-run    # 只看请求体，不联网
+python3 genvideo.py "配置检查" --dry-run              # 同上
 ```
+
+## 30 秒决策表
+
+| 用户说 | 动作 |
+|---|---|
+| 生图 / 画一张 / 出图 | `genimg.py "提示词" --provider banana` |
+| 要更好效果 / 复杂海报 / 细节多 | 先 `--list-models`，再 `--model` 指定更强模型（如 `gpt-image-2.5-flare`）；Pro 必须显式加 |
+| 点名 GPT Image / image2 / `gpt-image-2` | `--provider image2` |
+| 想知道哪个模型更好 | `--provider banana,image2 --jobs 2` |
+| 改这张图 / 换背景 / 修图 | `--image 路径` + 只描述要改的那一处 |
+| 只改局部 | `--image` + `--mask`（遮罩须与第一张图同尺寸、带 alpha） |
+| 给两张参考图融合 | `--image a.png --image b.png`，用「第一张/第二张」指代 |
+| 要透明底商品图 | `--background transparent`，出图后看有没有 ⚠ 再决定怎么交付 |
+| 要竖版 / 横版 | `--size 1024x1536` / `--size 1536x1024`（`--aspect-ratio` 实测无效） |
+| 一次生成一批图 | `--prompt-file prompts.txt`（一行一条） |
+| 要 N 张候选 | `--n 3` |
+| 不确定账号能用哪些模型 | `--list-models`（免费，不生成图） |
+| 想让人从列表里挑模型 | `--pick-model`（终端交互，agent 环境自动跳过） |
+| 要做视频 / 即梦 / Seedance | `genvideo.py`，见下方视频工作流 |
 
 ## 图片工作流
 
-根据用户意图选择 provider：
+### 模型：自动发现 + 自动择优
 
-- 默认使用 `banana`，模型为 `gpt-image-gemini-flash`。
-- 只有用户明确要求 Pro 或更高质量时，才添加
-  `--model gpt-image-gemini-pro`。Pro 失败时不要静默降级。
-- 用户点名 GPT Image、image2 或 `gpt-image-2` 时使用 `image2`。
-- 用户明确要求比较两种结果时使用 `--provider banana,image2`。
+provider 只是本地的「默认参数包」，真正发给中转的是模型名。启动时会先查一次
+`/v1/models`（结果缓存在 `output/.genimg-models.json`，TTL 10 分钟），据此决定用哪个
+模型：
 
-文字生图固定调用 Sub2 `/images/generations`，图片修改固定调用 Sub2
-`/images/edits` multipart。只发送 Sub2 别名；不要发送真实 Gemini 上游模型名，
-不要改用 `/chat/completions`，不要直连上游。
+| 情况 | 行为 |
+|---|---|
+| 用户没指定模型 | 自动择优：配置值（若账号有）→ `gpt-image-2` → `gpt-image-gemini-flash` → 列表里第一个像图片的模型；切换会打印说明 |
+| 用户 `--model NAME` 指定 | 直接发该模型；不在已知列表只打印一行提示，不再本地拦截 |
+| 拉不到列表（网络/权限） | 回退到配置默认模型，继续出图，不阻塞 |
+| `--no-discover` | 跳过查询，固定用配置默认 |
+| `--refresh-models` | 忽略缓存重新拉 |
 
-常用命令：
+自动择优**不会**选 `gpt-image-gemini-pro` 这类高价模型。Pro 必须用户显式加
+`--model gpt-image-gemini-pro`；Pro 失败不要静默降级成 Flash。
 
 ```bash
-# 默认生图
-python3 genimg.py "一只戴墨镜的柴犬" --provider banana
-
-# GPT Image
-python3 genimg.py "透明底产品图" --provider image2 \
-  --size 1536x1024 --quality high --background transparent
-
-# 图片编辑
-python3 genimg.py "只把背景改成夜晚城市，保持主体与构图不变" \
-  --provider banana --image ./input.png --out ./output/edited
-
-# 多张参考图
-python3 genimg.py "保留第一张主体，采用第二张配色" \
-  --provider image2 --image ./subject.png --image ./style.png
+python3 genimg.py --list-models                 # 看账号能用哪些生图模型
+python3 genimg.py "提示词" --provider image2    # 自动择优
+python3 genimg.py "提示词" --model gpt-image-2.5-flare   # 显式指定任意模型
 ```
 
-`--image` 接受本地文件、HTTP(S) URL、Data URL 或纯 Base64，可重复。脚本会把 URL
-下载为图片字节，把 Base64 解码为图片字节，校验文件签名后统一作为 multipart
-文件字段 `image` 上传。不要把 URL 或 Base64 当成普通文本字段发送。使用 `--mask`
-进行局部编辑时，让遮罩与第一张图片保持相同尺寸和格式并包含 alpha 通道。
+文字生图固定 `/images/generations`，带图编辑固定 `/images/edits` multipart；不要改用
+`/chat/completions`。已知上游名（`gemini-3-pro-image` 等）仍会自动翻成中转别名。
 
-把用户明确提出的尺寸、质量、数量、比例、背景和格式转换为参数，不要只写进提示词：
+### 不同模型的兼容性（实测）
 
-- `--size`、`--quality`、`--n`
-- `--aspect-ratio`
-- `--background`、`--output-format`、`--output-compression`
-- `--mask`
+- **有的模型忽略 `--size`**：请求 1024×1024 可能返回 1254×1254。以清单里的实际宽高为准，
+  汇报时说实际值，不要复述请求值。
+- **参数容忍度不同**：某模型在 `image2`（会带 `quality`/`output_format`）下报
+  `Invalid request`，换 `--provider banana`（只带 model/prompt/n）就能发出去。
+  新模型先试 banana 组的最小参数。
+- **产物可能由上游直出**：部分模型的图片链接是上游域名（如 `imgen.x.ai`）且需要上游
+  鉴权，中转没代理该产物，下载必然 403。这类模型在本机取不到图，换 `gpt-image-2` 等
+  产物经中转代理的模型。绝不把中转 Key 发给第三方域名。
 
-用户没有提出时采用 provider 默认值，不要擅自使用 Pro 或 4K。需要查看全部参数时运行
-`python3 genimg.py --help`。
+## 生图参数设置
+
+参数分两类：**能可靠改变产物的**（`--size`、`--n`、`--model`）和**中转可能空转的**
+（`--quality`、`--aspect-ratio`、`--background`、`--output-format`）。设置参数走四步，
+第 4 步不做就不许汇报。
+
+### 第一步：从需求里抠约束
+
+| 用户表述 | 参数 | 备注 |
+|---|---|---|
+| 尺寸、竖版、横版、方形、比例 | `--size WxH` | 唯一可靠的尺寸入口 |
+| 几张、几个方案、要挑 | `--n N` | 自动加 `_0/_1/_2` 后缀 |
+| 透明底、去背景 | `--background transparent` | 必须校验是否生效 |
+| png / jpg / webp、压小一点 | `--output-format` + `--output-compression` | 必须校验是否生效 |
+| 高清、2K、4K、质量高一点 | `--quality` | 实测无效，改走换模型或加尺寸 |
+| 指定或换模型 | `--model NAME` | 不指定则自动择优 |
+| 种子、复现同一张 | `--param seed=42` | 中转支持才有效 |
+| 中转私有字段 | `--param key=value` | 支持 `a.b=value` 嵌套 |
+
+用户没提的一律用 provider 默认值：不擅自上 Pro、4K、透明底或更大尺寸。
+
+### 第二步：把「比例」换算成具体宽高
+
+`--aspect-ratio` 实测无效（请求 16:9 返回了竖图），比例只能通过 `--size` 表达。
+实测可用档位：
+
+| 用途 | 参数 | 实测体积 | 耗时 |
+|---|---|---|---|
+| 头像 / 图标 / 方图 | `--size 1024x1024` | ~2.7 MB | ~30s |
+| 草稿 / 小图 / 省流量 | `--size 512x512` | ~0.7 MB | ~35s |
+| 横版封面 / Banner / 视频封面 | `--size 1536x1024` | ~2.2 MB | ~30s |
+| 竖版海报 / 手机壁纸 | `--size 1024x1536` | ~2.4 MB | ~27s |
+| 印刷 / 大图 / 细节展示 | `--size 2048x2048` | ~9.4 MB | ~36s |
+
+不给 `--size` 时尺寸由模型自己定，实测漂移出过 1254×1254、1230×1278、1086×1448、
+1024×1536。需要可控尺寸就必须显式指定。
+
+### 第三步：常见场景直接套配方
+
+```bash
+# 头像 / 方图
+python3 genimg.py "提示词" --provider banana --size 1024x1024
+
+# 横版封面
+python3 genimg.py "提示词" --provider banana --size 1536x1024
+
+# 竖版海报（手机屏）
+python3 genimg.py "提示词" --provider banana --size 1024x1536
+
+# 要几个方案挑选
+python3 genimg.py "提示词" --provider banana --n 3 --size 1024x1024
+
+# 两个模型并行各出一张对比
+python3 genimg.py "提示词" --provider banana,image2 --jobs 2 --size 1024x1024
+
+# 商品透明底（必须校验）
+python3 genimg.py "提示词" --provider banana --size 1024x1024 --background transparent
+
+# 改图且锁住尺寸，别让模型自己改构图
+python3 genimg.py "只把背景换成夜景，主体不变" --image in.png \
+  --size 1024x1024 --out out.png
+```
+
+### 第四步：校验参数有没有落地（必做）
+
+脚本会对比「请求 vs 实际产物」，不符就打印 ⚠，并写进清单的 `parameter_warnings`：
+
+```text
+[image2] ⚠ 请求 size=1024x1024，实际 1254x1254：中转没有按 size 出图
+[image2] ⚠ 请求 background=transparent，实际是无 alpha 通道的 RGB：中转不支持透明底
+[image2] ⚠ 请求 output_format=webp，实际 image/png：中转忽略了输出格式
+[image2] ⚠ quality=low 无法从产物验证；实测部分中转直接忽略该参数
+```
+
+看到 ⚠ 就按下面的替代方案处理，并把真实情况告诉用户，不要当作已生效。
+
+### 参数生效性（真实中转实测：gpt-image-2，16 张单变量对照）
+
+| 参数 | 生效 | 实测证据 |
+|---|---|---|
+| `--size` 512² / 1024² / 1536×1024 / 1024×1536 / 2048² | ✅ | 请求多少返回多少 |
+| `--n 2` | ✅ | 真返回 2 张 |
+| `--quality low / medium / high / 4K` | ❌ | 固定 size 下 2746 / 2725 / 2792 KB，画质无差别；`4K` 仍返回 1024×1024 |
+| `--aspect-ratio 16:9` | ❌ | 返回 1024×**1536** 竖图 |
+| `--background transparent` | ❌ | 返回 color_type=2 的 RGB，透明像素 0% |
+| `--output-format webp` + `--output-compression` | ❌ | 返回的仍是 PNG |
+| 不给 `--size` | ⚠ | 尺寸随提示词漂移，不可控 |
+
+体积近似按面积走：512²≈0.7 MB、1024²≈2.7 MB、2048²≈9.4 MB。**唯一可靠的体积杠杆是
+`--size`**；`--quality` 和 `--output-compression` 在这个中转上是空转。耗时与参数无关
+（26–49s 全在抖）。
+
+### 参数没生效怎么办
+
+| 用户要的 | 中转不给 | 替代做法 |
+|---|---|---|
+| 精确比例 | `--aspect-ratio` 无效 | 用 `--size` 直接给宽高 |
+| 透明底 | 返回无 alpha 的 RGB | 先试一次；没生效就明说，再本地抠图（下方命令） |
+| webp / 更小文件 | 仍返回 PNG | 本地转格式（下方命令） |
+| 画质更高 | `--quality` 无效 | 换模型（`gpt-image-2.5-flare` 等），实测质感确有差别 |
+| 超过 2048 的尺寸 | 未验证 | 先出 2048×2048，再本地放大 |
+
+本地收尾（优于假装参数生效）：
+
+```bash
+# 转格式 / 压体积（macOS 自带 sips）
+sips -s format jpeg -s formatOptions 80 in.png --out out.jpg
+
+# 抠掉纯色背景（有 ImageMagick 时）
+magick in.png -fuzz 8% -transparent white out.png
+```
+
+### 参数设置的硬规则
+
+- 只有 `--size`、`--n`、`--model` 能可靠改变产物；其余参数只当「请求」，不当「保证」。
+- 传了 `--quality high` 不等于画质提升，传了 `--background transparent` 不等于透明底 ——
+  没校验过的参数不许写进汇报。
+- 用户没提的增强参数一律不加，不为了「效果更好」擅自加 Pro、4K、2048。
+- 要小文件就降 `--size`，不要指望 quality 或压缩参数。
+
+### 输入图来源
+
+`--image` / `--mask` 接受本地路径、HTTP(S) URL、`data:image/...;base64,...`、纯 Base64，
+可重复。脚本会把 URL 下载、Base64 解码、校验文件签名后，作为 multipart 文件字段上传；
+单张上限 20 MB。不要把 URL 或 Base64 当普通文本字段发。
+
+编辑时只用「改哪里、改成什么」描述动作，保留主体与构图说明；一次只改一到两处，
+多轮迭代比一次写十条要求更稳。遮罩尺寸与第一张输入图不一致会被直接拒绝。
+
+### 批量与并发
+
+```bash
+# 多提示词批量：一行一条，# 开头是注释
+python3 genimg.py --prompt-file prompts.txt --provider banana
+
+# 两个模型并行出图，便于挑选
+python3 genimg.py "赛博朋克街景" --provider banana,image2 --jobs 2
+```
+
+### 输出与运行清单
+
+- 默认输出目录 `./output`；`--out` 指定文件名，多图/多 provider 时自动加序号后缀，
+  后缀以实际图片格式为准（请求 png 也可能拿到 jpg）。
+- 每次真实运行都会写一份 `output/run-<时间戳>.json` 清单，含提示词、模型、实际参数、
+  每张图的绝对路径、宽高、格式、字节数、sha256 前 16 位、耗时；`--no-manifest` 可关。
+  后续追问「刚才那张参数是什么」直接读清单，不要重新生成。
+
+## 提示词工程
+
+默认把中文需求写成结构化描述，而不是一句话丢过去。推荐骨架：
+
+```
+主体（谁/什么，外观细节）+ 动作/姿态 + 场景环境 + 构图与机位（近景/俯拍/三分法）+
+光线（侧逆光/柔光/霓虹）+ 材质与风格（胶片颗粒/等距 3D/扁平插画）+ 色彩倾向 +
+画面比例与留白要求 + 明确排除项
+```
+
+要点：
+
+1. **具体优于形容词堆叠**。「米白色粗针织毛衣」优于「好看的衣服」。
+2. **文字渲染**：把要出现的文字用引号原样写出并指定位置语言字体感，例如
+   `画面中央烫金字「OPEN」，无衬线粗体`；文字越短越准，长句容易糊。
+3. **参考图**用「第一张/第二张」指代，并说明各自继承什么：
+   `保留第一张的人物姿态与脸型，采用第二张的配色与光影`。
+4. **编辑只描述差异**：`只把背景换成雨夜霓虹街道，人物、服装、姿势、构图完全不变`。
+   要求「完全不变」的部分要点名，否则模型会顺手改掉。
+5. **一致性系列**：同一批图固定风格词、光线词与 `--param seed=42`，只替换主体。
+6. **负面约束写成正向替代**：「不要模糊」→「主体边缘锐利、细节清晰」。
+7. **别写模型不知道的私有指代**（「我上次那个风格」），先落到具体视觉特征。
+
+## 结果汇报契约
+
+图片完成后回报：provider、模型、图片绝对路径、**实际宽高与格式**、耗时；多张就逐条列。
+有 `⚠` 参数未生效时必须一并说明（例：「size 请求 1024×1024，实际返回 1254×1254」），不许只报请求值。
+生成失败时回报 HTTP 状态与中转原文关键句，加上脚本给出的下一步提示，不要编造成功。
 
 ## 视频工作流
 
-用户要求即梦、Seedance 或视频生成时运行 `genvideo.py`：
-
 ```bash
-# 默认快速版，创建后持续轮询并下载
+# 默认快速版，创建后轮询并下载
 python3 genvideo.py "雨夜城市上空飞行，镜头缓慢推进" \
   --model video-ds-2.0-fast --seconds 5 --aspect-ratio 16:9 \
   --out ./output/result.mp4
 
-# 创建后立即返回
+# 只创建任务，立刻拿 task_id
 python3 genvideo.py "海边日出" --seconds 10 --no-wait
 
-# 续查已有任务，禁止重复创建
+# 用任务 ID 续查（绝不重复创建付费任务）
 python3 genvideo.py --task-id task_xxx --out ./output/resumed.mp4
+
+# 从本地记录自动续查最近未完成任务
+python3 genvideo.py --resume-last
+
+# 看本地已建过哪些任务
+python3 genvideo.py --list-tasks
 ```
 
-默认使用 `video-ds-2.0-fast`；只有用户明确要求标准版时使用 `video-ds-2.0`。任务创建
-成功后立即记录 `task_id`。等待中断或超时后用 `--task-id` 续查，绝不因为中断而重复
-创建付费任务。
+默认 `video-ds-2.0-fast`；用户明确要标准版才用 `video-ds-2.0`。
 
-视频参考图片、视频和音频必须是公网 URL。用户提供本地文件时，先说明文件将上传到
-所选第三方服务并取得同意，再使用 `--auto-upload catbox` 或用户指定的服务。不要在
-未经确认的情况下公开上传本地素材。需要查看全部参数时运行
-`python3 genvideo.py --help`。
+**任务记录**：创建成功后立刻把 `task_id`、模型、时长、提示词写进输出目录的
+`.genvideo-tasks.jsonl`（`--log-file` 可改），完成/失败也会追加一条。中断、超时、
+上下文丢失后一律 `--task-id` 或 `--resume-last` 续查，不要重新创建。
 
-## 错误处理与安全
+参考素材必须是公网 URL。本地文件要先征得用户同意再上传图床（`--auto-upload catbox`
+或用户指定服务），未经确认不要公开上传。完成后脚本会打印保存路径与媒体信息
+（有 `ffprobe` 时给出分辨率、时长、编码）。
 
-- 对图片请求的 HTTP 429/503 保持原 provider 和模型，按 2、4、8 秒最多重试三次。
-- 原样报告 `model_not_found`、无可用渠道、内容审核和余额不足；不要偷换收费模型。
-- 遇到 `images endpoint requires an image model` 时检查是否误用了真实 Gemini 模型名。
-- 视频创建成功后即使轮询失败也不要重新创建；返回任务 ID并说明续查命令。
-- 仅在排查时使用 `--debug`；不要输出完整 Key、Base64 或 Data URL。
-- 不要把中转 Authorization 头转发给任务返回的第三方对象存储 URL。
-- 图片完成后返回 provider、模型和本地绝对路径。
-- 视频完成后返回任务 ID、模型、时长、输出路径；可用时通过 `ffprobe` 验证媒体。
+## 错误处理
 
-完整 CLI 细节以脚本 `--help` 为准。只有需要调整 provider 默认参数时才复制
-`providers.example.json` 为 `providers.json`；不要在其中写入地址或 Key。
+| 现象 | 处理 |
+|---|---|
+| HTTP 429 / 503 | 脚本已按 2/4/8 秒退避重试 3 次且不换模型；仍失败就等下再试 |
+| `model_not_found` | 该中转没开通此模型；换 `--provider banana` 或让用户确认渠道 |
+| `No available compatible accounts` | 分组暂时没有可调度渠道，稍后重试或换 provider |
+| `images endpoint requires an image model` | 误用了真实 Gemini 上游模型名 |
+| 余额 / 额度不足 | 如实回报，不要换模型反复试 |
+| 内容审核拒绝（`upstream_policy_refusal_text` 等，可能是外语原文） | 换描述或去掉敏感词后重试一次；同一提示词不要连刷；要稳就换 `--model gpt-image-2` |
+| 新模型 `Invalid request` | 参数不兼容，改用 `--provider banana` 的最小参数再试 |
+| 产物下载 403（host 是上游域名） | 中转未代理该产物，客户端取不到；换产物经中转代理的模型 |
+| 实际尺寸≠请求尺寸 | 某些模型忽略 `--size`，以清单实际宽高为准 |
+| 413 | 减少 `--image` 张数或先压缩参考图 |
+| 下载结果不是图片/MP4 | 链接过期或防盗链，重新生成或续查，不要落盘假文件 |
+| 视频等待超时 | 保留 task_id，`--task-id` 续查 |
+
+排查用 `--debug`；它已对 Key、Base64、Data URL 去敏，不要自己打印完整 Key。
+下载视频时不要把中转 Authorization 头转发给第三方对象存储地址。
+
+## 硬性约束
+
+- 不擅自用 Pro、4K、透明底等加价或加时参数；用户没提就用默认（自动择优同样不选 Pro）。
+- 模型被自动切换时必须如实告知用户换成了哪个，不许悄悄换完就当作原模型的结果。
+- 不在失败时静默换收费模型、静默降级质量或谎报成功。
+- 不重复创建已存在的付费视频任务。
+- 不把中转地址或 Key 写进仓库、配置文件或日志。
+- `IMAGE_API_BASE` 必须含 `/v1`；地址与 Key 只来自环境变量。
+
+完整参数以 `python3 genimg.py --help`、`python3 genvideo.py --help` 为准；
+只有需要调整 provider 默认参数时才复制 `providers.example.json` 为 `providers.json`。

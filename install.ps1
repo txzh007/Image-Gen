@@ -1,5 +1,8 @@
 # genimg skill 一键安装脚本 (Windows PowerShell)
 
+# 让控制台按 UTF-8 输出，避免中文提示与 ✓ ✗ ⚠ 乱码
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
 Write-Host "🚀 开始安装 genimg skill..." -ForegroundColor Green
 
 $scriptDir = $PSScriptRoot
@@ -54,8 +57,13 @@ Write-Host "✅ 安装完成！位置: $target" -ForegroundColor Green
 Write-Host ""
 Write-Host "📋 下一步："
 Write-Host "  1. 设置环境变量: `$env:IMAGE_API_BASE='https://你的中转站/v1'; `$env:GENIMG_API_KEY='sk-xxx'"
-Write-Host "  2. 测试: python genimg.py 'test' --provider banana --dry-run"
-Write-Host "  3. 视频 dry-run: python genvideo.py 'test video' --dry-run"
+Write-Host "  2. 自检能不能用（免费，真验证 Key）:"
+Write-Host "       python genimg.py --list-models"
+Write-Host "  3. 出第一张图:"
+Write-Host "       python genimg.py '一只戴墨镜的柴犬' --size 1024x1024 --out .\first.png"
+Write-Host "  4. 视频 dry-run: python genvideo.py 'test video' --dry-run"
+Write-Host ""
+Write-Host "💡 若终端显示乱码：在 cmd 里先执行 chcp 65001，或改用 Windows Terminal / PowerShell 7"
 Write-Host ""
 if ($platform -eq "standalone") {
     Write-Host "💡 作为 skill 使用：将此目录移到 .codex\skills\、.claude\skills\ 或 .opencode\skills\"

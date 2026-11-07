@@ -1,4 +1,4 @@
 interface:
   display_name: "Sub2 图片与视频生成"
-  short_description: "通过 Sub2 生成和编辑图片，并创建、续查和下载异步视频任务"
-  default_prompt: "使用 $genimg 根据我的要求生成或编辑图片，并将结果保存到当前项目。"
+  short_description: "经用户自备中转（IMAGE_API_BASE + GENIMG_API_KEY）生成/编辑图片，并创建、续查、下载异步视频任务"
+  default_prompt: "使用 $genimg 完成我的出图或视频需求：先跑 `--list-models` 确认账号可用模型，再按 SKILL.md 的参数设置四步法选 size 和模型，把结果保存到当前项目，最后汇报模型、绝对路径、实际尺寸和耗时。"
