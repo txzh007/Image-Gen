@@ -84,13 +84,22 @@ class RequestBodyTests(unittest.TestCase):
                     "banana", {"banana": {"mode": "images"}}, self.provider_args()
                 )
 
-    def test_only_declared_sub2_image_models_are_allowed(self):
+    def test_unknown_models_pass_through_instead_of_being_blocked(self):
+        # 白名单已取消：本地只做别名归一化，可用性交给中转判断。
         self.assertEqual(
-            "gpt-image-gemini-pro",
-            genimg.validate_sub2_model("gemini-3-pro-image"),
+            "gpt-image-gemini-pro", genimg.validate_sub2_model("gemini-3-pro-image")
         )
-        with self.assertRaisesRegex(ValueError, "不支持的图片模型"):
-            genimg.validate_sub2_model("unknown-upstream-model")
+        self.assertEqual(
+            "gpt-image-2.5-flare", genimg.validate_sub2_model("gpt-image-2.5-flare")
+        )
+        self.assertEqual(
+            "grok-imagine-image-2.0",
+            genimg.validate_sub2_model("grok-imagine-image-2.0"),
+        )
+
+    def test_empty_model_name_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "模型名为空"):
+            genimg.validate_sub2_model("")
 
     def test_banana_pro_requires_explicit_model_argument(self):
         env = {
@@ -287,6 +296,21 @@ class RequestBodyTests(unittest.TestCase):
         self.assertEqual(b"ok", raw)
         self.assertEqual([2, 4], sleeps)
 
+    def test_gateway_502_is_retried(self):
+        responses = iter([(502, b"bad gateway"), (200, b"ok")])
+        sleeps = []
+
+        status, raw = genimg.post_with_retries(
+            lambda: next(responses), label="banana", sleep_fn=sleeps.append
+        )
+
+        self.assertEqual(200, status)
+        self.assertEqual([2], sleeps)
+
+    def test_gateway_502_hint_mentions_auto_retry(self):
+        hints = genimg.explain_error(502, "origin_bad_gateway", "gpt-image-2")
+        self.assertTrue(any("502" in h and "重试" in h for h in hints))
+
     def test_retry_stops_after_three_retries(self):
         calls = []
         sleeps = []
@@ -352,6 +376,395 @@ class RequestBodyTests(unittest.TestCase):
             [("url", "https://example.com/a.png"), ("b64", "YWJj")],
             found,
         )
+
+
+class ImageProbeTests(unittest.TestCase):
+    @staticmethod
+    def png(width, height):
+        import struct
+        import zlib
+
+        row = b"\x00" + b"\x00\x00\x00" * width
+        raw = row * height
+
+        def chunk(tag, data):
+            return (
+                struct.pack(">I", len(data))
+                + tag
+                + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+            )
+
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b"")
+        )
+
+    def test_png_size_is_probed(self):
+        self.assertEqual((640, 480), genimg.probe_image_size(self.png(640, 480)))
+
+    def test_gif_size_is_probed(self):
+        gif = b"GIF89a" + (320).to_bytes(2, "little") + (200).to_bytes(2, "little") + b"\x00" * 8
+        self.assertEqual((320, 200), genimg.probe_image_size(gif))
+
+    def test_jpeg_size_is_probed(self):
+        jpeg = (
+            b"\xff\xd8"
+            + b"\xff\xe0" + (4).to_bytes(2, "big") + b"\x00\x00"
+            + b"\xff\xc0" + (17).to_bytes(2, "big") + b"\x08"
+            + (1080).to_bytes(2, "big") + (1920).to_bytes(2, "big")
+            + b"\x03" + b"\x00" * 9
+        )
+        self.assertEqual((1920, 1080), genimg.probe_image_size(jpeg))
+
+    def test_unknown_bytes_return_none(self):
+        self.assertEqual((None, None), genimg.probe_image_size(b"not an image"))
+
+    def test_dimension_text_falls_back(self):
+        self.assertEqual("尺寸未知", genimg.describe_dimensions(None, None))
+        self.assertEqual("8x8", genimg.describe_dimensions(8, 8))
+
+
+class MaskAndManifestTests(unittest.TestCase):
+    def test_matching_mask_passes(self):
+        images = [{"width": 512, "height": 512}]
+        genimg.check_mask_dimensions(images, {"width": 512, "height": 512})
+
+    def test_mismatched_mask_is_rejected(self):
+        images = [{"width": 512, "height": 512}]
+        with self.assertRaisesRegex(ValueError, "遮罩尺寸"):
+            genimg.check_mask_dimensions(images, {"width": 256, "height": 512})
+
+    def test_unparsable_mask_is_allowed(self):
+        genimg.check_mask_dimensions([{"width": None, "height": None}], {"width": 1, "height": 1})
+
+    def test_manifest_records_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [
+                {
+                    "provider": "banana",
+                    "model": "gpt-image-gemini-flash",
+                    "operation": "generate",
+                    "prompt": "cat",
+                    "saved": [{"path": "/tmp/a.png", "width": 8, "height": 8}],
+                }
+            ]
+            path = genimg.write_run_manifest(tmp, records, extra={"providers": ["banana"]})
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+
+        self.assertEqual(1, data["saved_total"])
+        self.assertEqual(["banana"], data["providers"])
+        self.assertEqual("banana", data["runs"][0]["provider"])
+
+
+class SaveImageTests(unittest.TestCase):
+    def test_b64_image_saved_with_probed_extension_and_meta(self):
+        raw = ImageProbeTests.png(64, 32)
+        encoded = genimg.base64.b64encode(raw).decode("ascii")
+        with tempfile.TemporaryDirectory() as tmp:
+            info = genimg.save_image("b64", encoded, Path(tmp) / "out.webp", timeout=5)
+
+        self.assertTrue(info["path"].endswith(".png"))
+        self.assertEqual((64, 32), (info["width"], info["height"]))
+        self.assertEqual("image/png", info["mime"])
+        self.assertEqual(16, len(info["sha256"]))
+
+    def test_url_payload_that_is_html_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(genimg, "http_get_bytes", return_value=b"<html>403</html>"):
+                with self.assertRaisesRegex(ValueError, "不是图片"):
+                    genimg.save_image(
+                        "url", "https://cdn.example/a.png", Path(tmp) / "a.png", timeout=5
+                    )
+
+
+class PromptFileTests(unittest.TestCase):
+    def test_prompt_file_skips_comments_and_blank_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "prompts.txt"
+            path.write_text("# 注释\n甲\n\n乙\n", encoding="utf-8")
+            self.assertEqual(["甲", "乙"], genimg.read_prompt_file(path))
+
+    def test_empty_prompt_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "prompts.txt"
+            path.write_text("# 只有注释\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "没有有效提示词"):
+                genimg.read_prompt_file(path)
+
+
+class ErrorHintTests(unittest.TestCase):
+    def test_model_error_hint(self):
+        hints = genimg.explain_error(400, "model_not_found: gpt-image-2", "gpt-image-2")
+        self.assertTrue(any("中转没有开通" in h for h in hints))
+
+    def test_auth_hint(self):
+        hints = genimg.explain_error(401, "invalid key", "gpt-image-2")
+        self.assertTrue(any("GENIMG_API_KEY" in h for h in hints))
+
+    def test_upstream_policy_refusal_hint_matches_foreign_text(self):
+        hints = genimg.explain_error(
+            400,
+            '{"code":"upstream_policy_refusal_text","message":'
+            '"das Bild verstößt gegen unsere Inhaltsrichtlinien"}',
+            "gpt-image-2.5-flare",
+        )
+        self.assertTrue(any("内容审核" in h for h in hints))
+
+    def test_retryable_hint(self):
+        hints = genimg.explain_error(429, "busy", "gpt-image-gemini-flash")
+        self.assertTrue(any("退避重试" in h for h in hints))
+
+
+class ModelClassificationTests(unittest.TestCase):
+    def test_image_models_are_recognised(self):
+        for name in ("gpt-image-2", "gpt-image-gemini-flash", "gpt-image-2.5-flare",
+                     "grok-imagine-image-2.0", "flux-pro-1.1", "seedream-4"):
+            self.assertTrue(genimg.looks_like_image_model(name), name)
+
+    def test_text_and_embedding_models_are_not_images(self):
+        for name in ("deepseek-v4-flash", "glm-5.3", "kimi-k3.1-pro",
+                     "text-embedding-3-small", "tts-1-hd"):
+            self.assertFalse(genimg.looks_like_image_model(name), name)
+
+
+class ModelPickTests(unittest.TestCase):
+    def test_no_list_falls_back_to_configured(self):
+        self.assertEqual(
+            "gpt-image-gemini-flash",
+            genimg.pick_image_model(None, "gpt-image-gemini-flash"),
+        )
+
+    def test_configured_model_wins_when_available(self):
+        self.assertEqual(
+            "gpt-image-2.5-flare",
+            genimg.pick_image_model(
+                ["gpt-image-2", "gpt-image-2.5-flare"], "gpt-image-2.5-flare"
+            ),
+        )
+
+    def test_unavailable_configured_model_is_replaced_by_preference(self):
+        self.assertEqual(
+            "gpt-image-2",
+            genimg.pick_image_model(
+                ["deepseek-v4-flash", "gpt-image-2.5-flare", "gpt-image-2"],
+                "gpt-image-gemini-flash",
+            ),
+        )
+
+    def test_first_image_model_is_used_when_no_preference_matches(self):
+        self.assertEqual(
+            "gpt-image-2.5-sunburst",
+            genimg.pick_image_model(["glm-5.3", "gpt-image-2.5-sunburst"],
+                                    "gpt-image-gemini-flash"),
+        )
+
+    def test_pro_is_not_chosen_automatically(self):
+        picked = genimg.pick_image_model(
+            ["gpt-image-gemini-pro", "gpt-image-2"], "gpt-image-gemini-flash"
+        )
+        self.assertEqual("gpt-image-2", picked)
+
+    def test_all_text_models_keep_configured_value(self):
+        self.assertEqual(
+            "gpt-image-gemini-flash",
+            genimg.pick_image_model(["deepseek-v4-flash", "glm-5.3"],
+                                    "gpt-image-gemini-flash"),
+        )
+
+
+class ModelDiscoveryTests(unittest.TestCase):
+    def fake_urlopen(self, payload):
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps(payload).encode("utf-8")
+        response.__enter__.return_value = response
+        return response
+
+    def test_fetch_parses_object_list(self):
+        payload = {"data": [{"id": "gpt-image-2"}, {"id": "glm-5.3"}]}
+        with mock.patch("urllib.request.urlopen", return_value=self.fake_urlopen(payload)):
+            names, error = genimg.fetch_available_models("https://x/v1", "k", timeout=5)
+        self.assertIsNone(error)
+        self.assertEqual(["gpt-image-2", "glm-5.3"], names)
+
+    def test_fetch_reports_http_error_without_raising(self):
+        error = genimg.urllib.error.HTTPError("u", 401, "no", {}, None)
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            names, message = genimg.fetch_available_models("https://x/v1", "k", timeout=5)
+        self.assertIsNone(names)
+        self.assertIn("401", message)
+
+    def test_discovery_caches_within_ttl(self):
+        calls = []
+
+        def fake_fetch(*args, **kwargs):
+            calls.append(1)
+            return ["gpt-image-2"], None
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            genimg, "fetch_available_models", side_effect=fake_fetch
+        ):
+            first = genimg.discover_models("https://x/v1", "k", outdir=tmp)
+            second = genimg.discover_models("https://x/v1", "k", outdir=tmp)
+            third = genimg.discover_models("https://x/v1", "k", outdir=tmp, refresh=True)
+
+        self.assertEqual(2, len(calls))
+        self.assertFalse(first[2])
+        self.assertTrue(second[2])
+        self.assertFalse(third[2])
+
+    def test_discovery_failure_returns_error(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            genimg, "fetch_available_models", return_value=(None, "HTTP 500")
+        ):
+            names, error, cached = genimg.discover_models("https://x/v1", "k", outdir=tmp)
+
+        self.assertIsNone(names)
+        self.assertEqual("HTTP 500", error)
+        self.assertFalse(cached)
+
+
+class SameOriginAuthTests(unittest.TestCase):
+    def test_same_host_is_recognised(self):
+        self.assertTrue(
+            genimg._same_origin(
+                "https://token.gufacoding.com/files/a.png",
+                "https://token.gufacoding.com/v1",
+            )
+        )
+
+    def test_third_party_host_is_not_same_origin(self):
+        self.assertFalse(
+            genimg._same_origin(
+                "https://imgen.x.ai/images/a.png", "https://token.gufacoding.com/v1"
+            )
+        )
+        self.assertFalse(genimg._same_origin("not a url", "https://x/v1"))
+
+    def test_same_origin_download_sends_authorization(self):
+        captured = {}
+
+        def fake_get(url, timeout, headers=None):
+            captured["headers"] = headers
+            return b"\x89PNG\r\n\x1a\nbytes"
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            genimg, "http_get_bytes", side_effect=fake_get
+        ):
+            genimg.save_image(
+                "url",
+                "https://token.example/files/a.png",
+                Path(tmp) / "a.png",
+                timeout=5,
+                auth=("https://token.example/v1", "sk-secret"),
+            )
+
+        self.assertEqual({"Authorization": "Bearer sk-secret"}, captured["headers"])
+
+    def test_third_party_download_sends_no_authorization(self):
+        captured = {}
+
+        def fake_get(url, timeout, headers=None):
+            captured["headers"] = headers
+            return b"\x89PNG\r\n\x1a\nbytes"
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            genimg, "http_get_bytes", side_effect=fake_get
+        ):
+            genimg.save_image(
+                "url",
+                "https://imgen.x.ai/a.png",
+                Path(tmp) / "a.png",
+                timeout=5,
+                auth=("https://token.example/v1", "sk-secret"),
+            )
+
+        self.assertIsNone(captured["headers"])
+
+
+class ParameterVerificationTests(unittest.TestCase):
+    def test_matching_params_are_quiet(self):
+        problems = genimg.verify_requested_params(
+            {"size": "1024x1024", "output_format": "png"},
+            [{"width": 1024, "height": 1024, "mime": "image/png", "has_alpha": False}],
+        )
+        self.assertEqual([], problems)
+
+    def test_size_mismatch_is_reported(self):
+        problems = genimg.verify_requested_params(
+            {"size": "1024x1024"},
+            [{"width": 1254, "height": 1254, "mime": "image/png"}],
+        )
+        self.assertTrue(any("size" in item for item in problems))
+
+    def test_format_mismatch_is_reported(self):
+        problems = genimg.verify_requested_params(
+            {"output_format": "webp"},
+            [{"width": 8, "height": 8, "mime": "image/png"}],
+        )
+        self.assertTrue(any("输出格式" in item for item in problems))
+
+    def test_unsupported_transparency_is_reported(self):
+        problems = genimg.verify_requested_params(
+            {"background": "transparent"},
+            [{"width": 8, "height": 8, "mime": "image/png", "has_alpha": False}],
+        )
+        self.assertTrue(any("透明底" in item for item in problems))
+
+    def test_real_alpha_is_quiet(self):
+        problems = genimg.verify_requested_params(
+            {"background": "transparent"},
+            [{"width": 8, "height": 8, "mime": "image/png", "has_alpha": True}],
+        )
+        self.assertEqual([], problems)
+
+    def test_quality_is_flagged_as_unverifiable(self):
+        problems = genimg.verify_requested_params(
+            {"quality": "low"}, [{"width": 8, "height": 8, "mime": "image/png"}]
+        )
+        self.assertTrue(any("quality" in item for item in problems))
+
+    def test_png_alpha_probe_reads_color_type(self):
+        opaque = ImageProbeTests.png(4, 4)
+        self.assertFalse(genimg.png_has_alpha(opaque))
+        rgba = bytearray(opaque)
+        rgba[25] = 6
+        self.assertTrue(genimg.png_has_alpha(bytes(rgba)))
+        self.assertIsNone(genimg.png_has_alpha(b"not a png"))
+
+
+class StdioEncodingTests(unittest.TestCase):
+    def test_configure_stdio_is_idempotent(self):
+        genimg.configure_stdio()
+        genimg.configure_stdio()
+
+    def test_streams_without_reconfigure_are_skipped(self):
+        import io
+
+        fake = io.StringIO()
+        with mock.patch.object(genimg.sys, "stdout", fake), mock.patch.object(
+            genimg.sys, "stderr", fake
+        ):
+            genimg.configure_stdio()
+
+    def test_windows_hint_mentions_chcp(self):
+        class LegacyStream:
+            encoding = "cp1252"
+
+            def reconfigure(self, **_kwargs):
+                return None
+
+        stream = LegacyStream()
+        with mock.patch.object(genimg.sys, "stdout", stream), mock.patch.object(
+            genimg.sys, "stderr", stream
+        ), mock.patch.object(genimg.sys, "platform", "win32"), mock.patch(
+            "builtins.print"
+        ) as fake_print:
+            genimg.configure_stdio()
+        messages = " ".join(str(call) for call in fake_print.call_args_list)
+        self.assertIn("chcp 65001", messages)
 
 
 if __name__ == "__main__":

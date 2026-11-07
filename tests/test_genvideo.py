@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -92,6 +93,82 @@ class VideoRequestTests(unittest.TestCase):
 
             self.assertTrue(genvideo._looks_like_mp4(valid))
             self.assertFalse(genvideo._looks_like_mp4(invalid))
+
+
+class TaskLogTests(unittest.TestCase):
+    def entry(self, **overrides):
+        base = {
+            "created_at": "2026-01-01T00:00:00",
+            "task_id": "task_1",
+            "status": "created",
+        }
+        base.update(overrides)
+        return base
+
+    def test_record_and_read_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "sub" / ".genvideo-tasks.jsonl"
+            self.assertTrue(genvideo.record_task(log, self.entry()))
+            self.assertTrue(genvideo.record_task(log, self.entry(task_id="task_2")))
+            entries = genvideo.read_task_entries(log)
+
+        self.assertEqual(["task_1", "task_2"], [e["task_id"] for e in entries])
+
+    def test_broken_lines_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "log.jsonl"
+            log.write_text(
+                json.dumps(self.entry()) + "\nnot-json\n", encoding="utf-8"
+            )
+            entries = genvideo.read_task_entries(log)
+
+        self.assertEqual(1, len(entries))
+
+    def test_latest_task_prefers_pending(self):
+        entries = [
+            self.entry(task_id="done", status="completed"),
+            self.entry(task_id="running", status="in_progress"),
+        ]
+        self.assertEqual("running", genvideo.latest_task(entries, only_pending=True)["task_id"])
+        self.assertEqual("running", genvideo.latest_task(entries)["task_id"])
+
+    def test_latest_task_falls_back_when_all_terminal(self):
+        entries = [self.entry(task_id="done", status="completed")]
+        self.assertEqual("done", genvideo.latest_task(entries, only_pending=True)["task_id"])
+        self.assertIsNone(genvideo.latest_task([]))
+
+    def test_log_path_defaults_to_out_directory(self):
+        args = types.SimpleNamespace(out="clips/a.mp4", log_file=None)
+        self.assertEqual(Path("clips") / ".genvideo-tasks.jsonl", genvideo.task_log_path(args))
+        args = types.SimpleNamespace(out=None, log_file="custom.jsonl")
+        self.assertEqual(Path("custom.jsonl"), genvideo.task_log_path(args))
+
+
+class MediaProbeTests(unittest.TestCase):
+    def test_missing_ffprobe_is_skipped_quietly(self):
+        with mock.patch("shutil.which", return_value=None):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "a.mp4"
+                path.write_bytes(b"\x00\x00\x00\x18ftypisom")
+                self.assertIsNone(genvideo.probe_media(path))
+                self.assertIn("跳过媒体校验", genvideo.describe_media(path))
+
+    def test_ffprobe_output_is_summarised(self):
+        completed = types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {"streams": [{"width": 1280, "height": 720, "duration": "5.02", "codec_name": "h264"}]}
+            ),
+        )
+        with mock.patch("shutil.which", return_value="/usr/bin/ffprobe"), mock.patch(
+            "subprocess.run", return_value=completed
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "a.mp4"
+                path.write_bytes(b"\x00\x00\x00\x18ftypisom")
+                text = genvideo.describe_media(path)
+
+        self.assertEqual("1280x720，5.0s，h264", text)
 
 
 if __name__ == "__main__":

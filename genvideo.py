@@ -7,6 +7,8 @@ import datetime as _dt
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -17,6 +19,35 @@ from pathlib import Path
 DEFAULT_MODEL = "video-ds-2.0-fast"
 DEFAULT_ENDPOINT = "/videos"
 TERMINAL_FAILURE_STATES = {"failed", "cancelled", "canceled", "expired"}
+TERMINAL_STATES = TERMINAL_FAILURE_STATES | {"completed"}
+TASK_LOG_NAME = ".genvideo-tasks.jsonl"
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_DELAYS = (2, 4)
+
+
+def configure_stdio():
+    """统一 stdout/stderr 编码。
+
+    Windows 控制台默认按本地代码页（cp936/cp1252）解码，输出里的中文和
+    ✓ ✗ ⚠ → 轻则乱码、重则 UnicodeEncodeError 直接崩。这里统一改成 UTF-8
+    并对无法编码的字符降级替换，保证任何终端下都不中断。
+    """
+    original = (getattr(sys.stdout, "encoding", "") or "").lower()
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (LookupError, ValueError, OSError):
+            continue
+    if original and original.replace("-", "") not in ("utf8", "utf8mb4"):
+        if sys.platform.startswith("win"):
+            print(
+                "[提示] Windows 终端若显示乱码，先执行 chcp 65001，"
+                "或改用 Windows Terminal / PowerShell 7。",
+                file=sys.stderr,
+            )
 
 
 def join_url(base, endpoint):
@@ -308,9 +339,133 @@ def download_completed_video(base_url, endpoint, task_id, payload, output, api_k
         return download_to_path(fallback_url, output, {}, timeout)
 
 
+def task_log_path(args):
+    """任务记录落在输出目录，保证中断后还能找回付费任务。"""
+    if getattr(args, "log_file", None):
+        return Path(args.log_file)
+    base = Path(args.out).parent if args.out else Path("output")
+    return base / TASK_LOG_NAME
+
+
+def record_task(path, entry):
+    """追加一条任务记录；写入失败不影响主流程。"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return True
+    except OSError as error:
+        print(f"[video] ⚠ 任务记录写入失败：{error}", file=sys.stderr)
+        return False
+
+
+def read_task_entries(path):
+    if not path.is_file():
+        return []
+    entries = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
+def latest_task(entries, only_pending=False):
+    """取最近一条任务；only_pending 时跳过已完成/失败的。"""
+    candidates = entries
+    if only_pending:
+        pending = [
+            item for item in candidates
+            if str(item.get("status", "")).lower() not in TERMINAL_STATES
+        ]
+        candidates = pending or candidates
+    return candidates[-1] if candidates else None
+
+
+def probe_media(path, timeout=20):
+    """有 ffprobe 时读取真实时长/分辨率，没有就静默跳过。"""
+    executable = shutil.which("ffprobe")
+    if not executable:
+        return None
+    try:
+        completed = subprocess.run(
+            [
+                executable, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height,duration,codec_name",
+                "-of", "json", str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        streams = json.loads(completed.stdout or "{}").get("streams") or []
+    except json.JSONDecodeError:
+        return None
+    return streams[0] if streams else None
+
+
+def describe_media(path):
+    info = probe_media(path)
+    if not info:
+        return "（未检测到 ffprobe，跳过媒体校验）"
+    parts = []
+    if info.get("width") and info.get("height"):
+        parts.append(f"{info['width']}x{info['height']}")
+    duration = info.get("duration")
+    if duration:
+        try:
+            parts.append(f"{float(duration):.1f}s")
+        except ValueError:
+            parts.append(f"{duration}s")
+    if info.get("codec_name"):
+        parts.append(str(info["codec_name"]))
+    return "，".join(parts) or "媒体信息为空"
+
+
 def default_output_path():
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     return Path("output") / f"video_{stamp}.mp4"
+
+
+def download_with_retries(base_url, endpoint, task_id, payload, output, api_key, timeout):
+    """下载失败重试 3 次；任务已完成，重试不产生额外费用。"""
+    last_error = None
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        try:
+            return download_completed_video(
+                base_url, endpoint, task_id, payload, output, api_key, timeout
+            )
+        except Exception as error:  # noqa: BLE001 - 统一转为重试或抛出
+            last_error = error
+            if attempt == DOWNLOAD_ATTEMPTS - 1:
+                break
+            delay = DOWNLOAD_DELAYS[min(attempt, len(DOWNLOAD_DELAYS) - 1)]
+            print(f"[video] 下载失败（第 {attempt + 1} 次）：{error}，{delay} 秒后重试")
+            time.sleep(delay)
+    raise RuntimeError(f"下载重试 {DOWNLOAD_ATTEMPTS} 次仍失败：{last_error}")
+
+
+def print_task_list(entries, log_path):
+    if not entries:
+        print(f"本地没有任务记录：{log_path}")
+        return
+    print(f"任务记录：{log_path}（共 {len(entries)} 条）")
+    for item in entries:
+        print(
+            f"  {item.get('created_at', '?')}  {item.get('task_id', '?')}  "
+            f"status={item.get('status', '?')}  model={item.get('model', '?')}  "
+            f"seconds={item.get('seconds', '?')}  out={item.get('out') or '-'}"
+        )
 
 
 def create_parser():
@@ -333,6 +488,12 @@ def create_parser():
     parser.add_argument("--auto-upload", choices=['catbox', 'telegraph', 'smms', 'imgbb'],
                         help="自动上传本地文件到图床（catbox=默认推荐，无需配置）")
     parser.add_argument("--task-id", help="续查已有任务，不创建新任务")
+    parser.add_argument("--resume-last", dest="resume_last", action="store_true",
+                        help="自动续查本地任务记录里最近一个未完成任务")
+    parser.add_argument("--list-tasks", dest="list_tasks", action="store_true",
+                        help="列出本地记录的视频任务（不联网）")
+    parser.add_argument("--log-file", dest="log_file",
+                        help=f"任务记录文件，默认输出目录下的 {TASK_LOG_NAME}")
     parser.add_argument("--no-wait", action="store_true",
                         help="创建后立即返回 task_id，不轮询或下载")
     parser.add_argument("--out", "-o", help="输出 MP4 路径")
@@ -355,6 +516,7 @@ def create_parser():
 
 
 def main(argv=None):
+    configure_stdio()
     parser = create_parser()
     args = parser.parse_args(argv)
     if args.poll_interval < 1:
@@ -363,6 +525,24 @@ def main(argv=None):
         parser.error("超时参数必须大于 0")
     if args.task_id and args.dry_run:
         parser.error("--task-id 不能与 --dry-run 一起使用")
+
+    log_path = task_log_path(args)
+
+    if args.list_tasks:
+        print_task_list(read_task_entries(log_path), log_path)
+        return 0
+
+    if args.resume_last:
+        if args.task_id:
+            parser.error("--resume-last 与 --task-id 只能二选一")
+        last = latest_task(read_task_entries(log_path), only_pending=True)
+        if not last or not last.get("task_id"):
+            parser.error(f"本地没有可续查的任务记录：{log_path}")
+        args.task_id = last["task_id"]
+        if not args.out and last.get("out"):
+            args.out = last["out"]
+        print(f"[video] 从本地记录续查：{args.task_id}")
+
     if not args.task_id and not args.prompt:
         parser.error("创建任务时缺少视频提示词")
 
@@ -373,7 +553,9 @@ def main(argv=None):
     base_url = os.environ.get("IMAGE_API_BASE")
     api_key = os.environ.get("GENIMG_API_KEY")
     if not base_url:
-        parser.error("缺少 IMAGE_API_BASE")
+        parser.error(
+            "缺少 IMAGE_API_BASE。先执行：export IMAGE_API_BASE='https://你的中转站/v1'"
+        )
     if not base_url.rstrip("/").endswith("/v1"):
         parser.error("IMAGE_API_BASE 必须包含并以 /v1 结尾")
     if not api_key and not args.dry_run:
@@ -418,7 +600,21 @@ def main(argv=None):
             if args.debug:
                 print(json.dumps(sanitize(payload), ensure_ascii=False, indent=2))
             return 1
+        record_task(
+            log_path,
+            {
+                "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
+                "task_id": task_id,
+                "status": "created",
+                "model": args.model,
+                "prompt": args.prompt,
+                "seconds": args.seconds,
+                "aspect_ratio": args.aspect_ratio,
+                "out": args.out,
+            },
+        )
         print(f"[video] ✓ 任务已创建：{task_id}")
+        print(f"[video] 已记录到 {log_path}")
         if args.no_wait:
             print(f"续查：python3 genvideo.py --task-id {task_id}")
             return 0
@@ -430,7 +626,7 @@ def main(argv=None):
         output = Path(args.out) if args.out else default_output_path()
         if output.suffix.lower() != ".mp4":
             output = output.with_suffix(".mp4")
-        path, size = download_completed_video(
+        path, size = download_with_retries(
             base_url,
             args.endpoint,
             task_id,
@@ -439,7 +635,20 @@ def main(argv=None):
             api_key,
             args.request_timeout,
         )
+        media = describe_media(path)
         print(f"[video] ✓ 保存 {path} ({size // 1024} KB)")
+        print(f"[video] 媒体信息：{media}")
+        record_task(
+            log_path,
+            {
+                "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
+                "task_id": task_id,
+                "status": "completed",
+                "out": str(path),
+                "bytes": size,
+                "media": media,
+            },
+        )
         return 0
     except KeyboardInterrupt:
         print(f"\n[video] 已停止等待，任务仍可续查：python3 genvideo.py --task-id {task_id}")
@@ -447,6 +656,16 @@ def main(argv=None):
     except Exception as error:
         print(f"[video] ✗ {error}")
         print(f"任务 ID：{task_id}")
+        print(f"续查：python3 genvideo.py --task-id {task_id}（记录在 {log_path}）")
+        record_task(
+            log_path,
+            {
+                "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
+                "task_id": task_id,
+                "status": "pending",
+                "error": str(error),
+            },
+        )
         return 1
 
 

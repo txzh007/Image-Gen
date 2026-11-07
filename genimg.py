@@ -19,7 +19,9 @@ genimg — 跨平台 Sub2API 图片 CLI，供 Claude Code / Codex / OpenCode 等
 import argparse
 import base64
 import binascii
+import concurrent.futures as _futures
 import datetime as _dt
+import hashlib
 import json
 import mimetypes
 import os
@@ -53,7 +55,8 @@ REQUEST_OPTION_NAMES = (
 
 GEMINI_IMAGE_SIZES = {"0.5K", "512", "1K", "2K", "4K"}
 DEFAULT_SUB2_IMAGE_MODEL = "gpt-image-gemini-flash"
-ALLOWED_SUB2_IMAGE_MODELS = {
+# 已知图片模型：只用于「猜哪些能生图」和打印提示，不再拦截请求。
+KNOWN_IMAGE_MODELS = {
     "gpt-image-gemini-flash",
     "gpt-image-gemini-pro",
     "gpt-image-2",
@@ -62,7 +65,27 @@ SUB2_MODEL_ALIASES = {
     "gemini-3.1-flash-image": "gpt-image-gemini-flash",
     "gemini-3-pro-image": "gpt-image-gemini-pro",
 }
-RETRYABLE_HTTP_STATUSES = {429, 503}
+# 从 /models 返回里挑图片模型的启发式关键词。
+IMAGE_MODEL_HINTS = (
+    "image", "dall", "flux", "banana", "imagine", "seedream", "seedance",
+    "imagen", "kolors", "wanx", "recraft", "ideogram", "sd3", "sdxl",
+    "stable-diffusion", "midjourney", "hidream", "janus", "qwen-image",
+)
+# 明确排除的非图片模型关键词，避免把多模态文本模型当成生图模型。
+NON_IMAGE_MODEL_HINTS = (
+    "embedding", "embed", "tts", "whisper", "rerank", "moderation",
+    "transcribe", "asr", "ocr",
+)
+# 自动择优的优先级：只放便宜/常规图片模型，Pro 级必须用户显式指定。
+AUTO_MODEL_PREFERENCE = (
+    "gpt-image-2",
+    "gpt-image-gemini-flash",
+)
+MODELS_CACHE_NAME = ".genimg-models.json"
+MODELS_CACHE_TTL = 600
+MODELS_ENDPOINT = "/models"
+# 429/503 是限流与不可用；502/504 是网关/上游超时，都值得退避重试。
+RETRYABLE_HTTP_STATUSES = {429, 502, 503, 504}
 RETRY_DELAYS = (2, 4, 8)
 MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024
 RASTER_MIME_BY_EXT = {
@@ -75,6 +98,15 @@ RASTER_MIME_BY_EXT = {
     ".tif": "image/tiff",
     ".tiff": "image/tiff",
 }
+# 落盘时用的规范后缀，按 MIME 反查（避免 .jpeg/.tif 这类别名）。
+EXT_BY_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "image/tiff": ".tiff",
+}
 
 # ----------------------------------------------------------------------------- config
 
@@ -83,13 +115,53 @@ def normalize_sub2_model(model):
     return SUB2_MODEL_ALIASES.get(model, model)
 
 
+_WARNED_UNKNOWN_MODELS = set()
+
+
 def validate_sub2_model(model):
-    """确保发往 Sub2 Images API 的模型是允许的兼容别名。"""
-    normalized = normalize_sub2_model(model)
-    if normalized not in ALLOWED_SUB2_IMAGE_MODELS:
-        allowed = "、".join(sorted(ALLOWED_SUB2_IMAGE_MODELS))
-        raise ValueError(f"不支持的图片模型 '{model}'；只能使用：{allowed}。")
+    """把已知上游名归一化成中转别名；未知模型放行，可用性交给中转判断。
+
+    本地只做两件事：别名翻译，以及对没见过的模型名提示一次（每进程一次）。
+    真正的模型可用性由中转的 /models 与 model_not_found 决定。
+    """
+    if not model:
+        raise ValueError("模型名为空。")
+    normalized = normalize_sub2_model(str(model).strip())
+    if normalized not in KNOWN_IMAGE_MODELS and normalized not in _WARNED_UNKNOWN_MODELS:
+        _WARNED_UNKNOWN_MODELS.add(normalized)
+        print(
+            f"[model] 提示：{normalized} 不在已知图片模型列表内，照常发送请求；"
+            "若中转返回 model_not_found，用 --list-models 查看账号可用模型。"
+        )
     return normalized
+
+
+def looks_like_image_model(name):
+    """按名字猜测是否是生图模型；只用于自动择优和列表展示。"""
+    lowered = str(name).lower()
+    if any(bad in lowered for bad in NON_IMAGE_MODEL_HINTS):
+        return False
+    return any(hint in lowered for hint in IMAGE_MODEL_HINTS)
+
+
+def pick_image_model(available, configured=None):
+    """在账号可用模型里择优；没有列表时退回配置值。
+
+    优先级：配置值（若列表里存在）> 常规图片模型优先级 > 列表里第一个像图片的
+    > 配置值。Pro 级模型不参与自动选择，避免静默升价。
+    """
+    configured = validate_sub2_model(configured) if configured else None
+    candidates = [m for m in (available or []) if looks_like_image_model(m)]
+    if not available:
+        return configured or DEFAULT_SUB2_IMAGE_MODEL
+    if configured and configured in available:
+        return configured
+    for preferred in AUTO_MODEL_PREFERENCE:
+        if preferred in candidates:
+            return preferred
+    if candidates:
+        return candidates[0]
+    return configured or DEFAULT_SUB2_IMAGE_MODEL
 
 def load_config(explicit=None):
     """按优先级找配置文件：--config 指定 > 当前目录 > 脚本目录。"""
@@ -114,25 +186,36 @@ def resolve_provider(name, config, args):
     image_api_base = os.environ.get("IMAGE_API_BASE")
     api_key = os.environ.get("GENIMG_API_KEY")
     if not image_api_base:
-        raise ValueError("缺少 IMAGE_API_BASE（必须包含并以 /v1 结尾）。")
+        raise ValueError(
+            "缺少 IMAGE_API_BASE。先执行："
+            "export IMAGE_API_BASE='https://你的中转站/v1'"
+            "（必须以 /v1 结尾），再 export GENIMG_API_KEY='sk-xxx'。"
+        )
     if not image_api_base.rstrip("/").endswith("/v1"):
         raise ValueError("IMAGE_API_BASE 必须包含并以 /v1 结尾。")
     if not api_key and not getattr(args, "dry_run", False):
         raise ValueError("缺少 GENIMG_API_KEY。")
 
-    model = args.model or cfg.get("model") or (
+    configured_model = cfg.get("model") or (
         DEFAULT_SUB2_IMAGE_MODEL if name == "banana" else name
     )
-    model = validate_sub2_model(model)
-    if (
-        name == "banana"
-        and model == "gpt-image-gemini-pro"
-        and not args.model
-    ):
-        raise ValueError(
-            "banana 的 Pro 模型必须由用户明确指定："
-            "--model gpt-image-gemini-pro。"
-        )
+    available = getattr(args, "available_models", None)
+    if args.model:
+        # 显式指定：只做别名归一化，可用性交给中转判断。
+        model = validate_sub2_model(args.model)
+    else:
+        configured_model = validate_sub2_model(configured_model)
+        if name == "banana" and configured_model == "gpt-image-gemini-pro":
+            raise ValueError(
+                "banana 的 Pro 模型必须由用户明确指定："
+                "--model gpt-image-gemini-pro。"
+            )
+        model = pick_image_model(available, configured_model)
+        if available and model != configured_model:
+            print(
+                f"[{name}] 默认模型 {configured_model} 不在账号可用列表内，"
+                f"自动改用 {model}；要指定请用 --model。"
+            )
     defaults = cfg.get("defaults", {})
     if defaults is None:
         defaults = {}
@@ -175,6 +258,31 @@ def resolve_provider(name, config, args):
 
 # ----------------------------------------------------------------------------- http
 
+def configure_stdio():
+    """统一 stdout/stderr 编码。
+
+    Windows 控制台默认按本地代码页（cp936/cp1252）解码，输出里的中文和
+    ✓ ✗ ⚠ → 轻则乱码、重则 UnicodeEncodeError 直接崩。这里统一改成 UTF-8
+    并对无法编码的字符降级替换，保证任何终端下都不中断。
+    """
+    original = (getattr(sys.stdout, "encoding", "") or "").lower()
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (LookupError, ValueError, OSError):
+            continue
+    if original and original.replace("-", "") not in ("utf8", "utf8mb4"):
+        if sys.platform.startswith("win"):
+            print(
+                "[提示] Windows 终端若显示乱码，先执行 chcp 65001，"
+                "或改用 Windows Terminal / PowerShell 7。",
+                file=sys.stderr,
+            )
+
+
 def join_url(base, endpoint):
     base = base.rstrip("/")
     if not endpoint.startswith("/"):
@@ -198,6 +306,124 @@ def build_headers(api_key, content_type="application/json"):
     if api_key:
         h["Authorization"] = f"Bearer {api_key}"
     return h
+
+
+# ----------------------------------------------------------------------------- model discovery
+
+
+def models_cache_path(outdir=None):
+    return Path(outdir or "output") / MODELS_CACHE_NAME
+
+
+def _read_models_cache(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_models_cache(path, data):
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def fetch_available_models(base_url, api_key, timeout=20):
+    """GET /models，返回 (names, error)；失败不抛异常，交给调用方回退。"""
+    url = join_url(base_url, MODELS_ENDPOINT)
+    request = urllib.request.Request(url, headers=build_headers(api_key), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        return None, f"HTTP {error.code}"
+    except urllib.error.URLError as error:
+        return None, str(error.reason)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, "返回不是 JSON"
+
+    items = payload.get("data") or payload.get("models") or []
+    if isinstance(items, dict):
+        items = list(items.values())
+    names, seen = [], set()
+    for item in items:
+        if isinstance(item, dict):
+            name = item.get("id") or item.get("name") or item.get("model")
+        else:
+            name = str(item)
+        if isinstance(name, str) and name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names, None
+
+
+def discover_models(base_url, api_key, outdir=None, refresh=False, timeout=20,
+                    ttl=MODELS_CACHE_TTL):
+    """带 TTL 缓存的模型发现；返回 (names, error, from_cache)。"""
+    path = models_cache_path(outdir)
+    cache_key = hashlib.sha256(base_url.encode("utf-8")).hexdigest()[:12]
+    now = time.time()
+    if not refresh:
+        cached = _read_models_cache(path).get(cache_key)
+        if cached and now - float(cached.get("fetched_at") or 0) < ttl:
+            models = cached.get("models")
+            if models:
+                return models, None, True
+    names, error = fetch_available_models(base_url, api_key, timeout)
+    if names is None:
+        return None, error, False
+    data = _read_models_cache(path)
+    data[cache_key] = {"fetched_at": now, "base_url": base_url, "models": names}
+    _write_models_cache(path, data)
+    return names, None, False
+
+
+def print_model_list(names, error=None, outdir=None):
+    if names is None:
+        print(f"拉取模型列表失败：{error}")
+        print("可以直接用 --model NAME 指定模型，或检查 IMAGE_API_BASE / GENIMG_API_KEY。")
+        return
+    images = [n for n in names if looks_like_image_model(n)]
+    print(f"账号可用模型 {len(names)} 个，其中疑似生图模型 {len(images)} 个：")
+    for index, name in enumerate(images, 1):
+        mark = "  ← 已知" if name in KNOWN_IMAGE_MODELS else ""
+        print(f"  {index}) {name}{mark}")
+    others = [n for n in names if n not in images]
+    if others:
+        shown = ", ".join(others[:12]) + ("…" if len(others) > 12 else "")
+        print(f"其它 {len(others)} 个（按名字判断不像生图模型）：{shown}")
+    print(f"缓存：{models_cache_path(outdir)}（--refresh-models 强制刷新）")
+
+
+def interactive_pick_model(names):
+    """终端交互选择；非 TTY（agent/管道）返回 None，由调用方自动择优。"""
+    images = [n for n in (names or []) if looks_like_image_model(n)]
+    if not images:
+        return None
+    if not sys.stdin.isatty():
+        print("[model] 非交互环境，跳过手动选择；用 --model NAME 指定具体模型。")
+        return None
+    print("可用生图模型：")
+    for index, name in enumerate(images, 1):
+        print(f"  {index}) {name}")
+    try:
+        raw = input("选择编号或模型名（回车=自动择优）: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not raw:
+        return None
+    if raw.isdigit() and 1 <= int(raw) <= len(images):
+        return images[int(raw) - 1]
+    if raw in names:
+        return raw
+    print(f"[model] 没有匹配到 {raw}，改用自动择优。")
+    return None
 
 
 def setup_proxy(no_proxy):
@@ -239,10 +465,20 @@ def post_with_retries(post_once, label="request", delays=RETRY_DELAYS, sleep_fn=
     return status, raw
 
 
-def http_get_bytes(url, timeout):
-    req = urllib.request.Request(url, method="GET")
+def http_get_bytes(url, timeout, headers=None):
+    req = urllib.request.Request(url, method="GET", headers=headers or {})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
+
+
+def _same_origin(url, base_url):
+    """判断产物 URL 是否就在中转自己域下（同源才允许带 Authorization）。"""
+    try:
+        target = urllib.parse.urlparse(url)
+        base = urllib.parse.urlparse(base_url or "")
+    except ValueError:
+        return False
+    return bool(target.hostname) and target.hostname.lower() == (base.hostname or "").lower()
 
 
 def sniff_input_mime(raw):
@@ -262,6 +498,111 @@ def sniff_input_mime(raw):
     return None
 
 
+def _probe_png(raw):
+    if len(raw) < 24 or raw[12:16] != b"IHDR":
+        return None
+    return int.from_bytes(raw[16:20], "big"), int.from_bytes(raw[20:24], "big")
+
+
+def _probe_gif(raw):
+    if len(raw) < 10:
+        return None
+    return int.from_bytes(raw[6:8], "little"), int.from_bytes(raw[8:10], "little")
+
+
+def _probe_webp(raw):
+    if len(raw) < 30:
+        return None
+    chunk = raw[12:16]
+    if chunk == b"VP8X":
+        width = int.from_bytes(raw[24:27], "little") + 1
+        height = int.from_bytes(raw[27:30], "little") + 1
+        return width, height
+    if chunk == b"VP8 ":
+        if raw[23:26] != b"\x9d\x01\x2a":
+            return None
+        width = int.from_bytes(raw[26:28], "little") & 0x3FFF
+        height = int.from_bytes(raw[28:30], "little") & 0x3FFF
+        return width, height
+    if chunk == b"VP8L":
+        if raw[20] != 0x2F:
+            return None
+        bits = int.from_bytes(raw[21:25], "little")
+        return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+    return None
+
+
+def _probe_bmp(raw):
+    if len(raw) < 26:
+        return None
+    width = int.from_bytes(raw[18:22], "little", signed=True)
+    height = int.from_bytes(raw[22:26], "little", signed=True)
+    return abs(width), abs(height)
+
+
+# SOF 段标记：C0-C3、C5-C7、C9-CB、CD-CF（跳过 DHT/JPG/DAC）。
+_JPEG_SOF_MARKERS = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                     0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+
+
+def _probe_jpeg(raw):
+    index = 2
+    total = len(raw)
+    while index < total - 9:
+        if raw[index] != 0xFF:
+            index += 1
+            continue
+        marker = raw[index + 1]
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            index += 2
+            continue
+        if index + 4 > total:
+            return None
+        segment_length = int.from_bytes(raw[index + 2:index + 4], "big")
+        if segment_length < 2:
+            return None
+        if marker in _JPEG_SOF_MARKERS:
+            height = int.from_bytes(raw[index + 5:index + 7], "big")
+            width = int.from_bytes(raw[index + 7:index + 9], "big")
+            return width, height
+        index += 2 + segment_length
+    return None
+
+
+def probe_image_size(raw):
+    """只读文件头解析宽高（PNG/JPEG/WebP/GIF/BMP），失败返回 (None, None)。
+
+    用于遮罩尺寸校验和结果汇报；TIFF 等未覆盖的格式返回未知，不阻塞流程。
+    """
+    if not raw:
+        return None, None
+    try:
+        if raw[:8] == b"\x89PNG\r\n\x1a\n":
+            size = _probe_png(raw)
+        elif raw[:3] == b"\xff\xd8\xff":
+            size = _probe_jpeg(raw)
+        elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+            size = _probe_webp(raw)
+        elif raw[:6] in (b"GIF87a", b"GIF89a"):
+            size = _probe_gif(raw)
+        elif raw[:2] == b"BM":
+            size = _probe_bmp(raw)
+        else:
+            size = None
+    except (IndexError, ValueError):
+        size = None
+    if not size:
+        return None, None
+    width, height = size
+    if not width or not height:
+        return None, None
+    return int(width), int(height)
+
+
+def describe_dimensions(width, height):
+    return f"{width}x{height}" if width and height else "尺寸未知"
+
+
 def _validated_image_upload(raw, filename, declared_mime=None, source="input"):
     if not raw:
         raise ValueError(f"输入图片为空：{source}")
@@ -275,20 +616,15 @@ def _validated_image_upload(raw, filename, declared_mime=None, source="input"):
     safe_name = (filename or "input").replace('"', "_")
     ext = Path(safe_name).suffix.lower()
     if not ext or RASTER_MIME_BY_EXT.get(ext) != detected_mime:
-        ext_by_mime = {
-            "image/png": ".png",
-            "image/jpeg": ".jpg",
-            "image/webp": ".webp",
-            "image/gif": ".gif",
-            "image/bmp": ".bmp",
-            "image/tiff": ".tiff",
-        }
-        safe_name = Path(safe_name).stem + ext_by_mime[detected_mime]
+        safe_name = Path(safe_name).stem + EXT_BY_MIME[detected_mime]
+    width, height = probe_image_size(raw)
     return {
         "filename": safe_name,
         "mime": detected_mime,
         "data": raw,
         "source": source,
+        "width": width,
+        "height": height,
     }
 
 
@@ -360,6 +696,42 @@ def describe_image_input(value):
     except OSError:
         pass
     return {"source": "base64", "content": "<omitted>"}
+
+
+def check_mask_dimensions(images, mask):
+    """遮罩必须与第一张输入图同尺寸；无法解析时放行，只在能判断时拦截。"""
+    if not mask or not images:
+        return
+    mask_w, mask_h = mask.get("width"), mask.get("height")
+    base_w, base_h = images[0].get("width"), images[0].get("height")
+    if not all((mask_w, mask_h, base_w, base_h)):
+        return
+    if (mask_w, mask_h) != (base_w, base_h):
+        raise ValueError(
+            f"遮罩尺寸 {mask_w}x{mask_h} 与第一张输入图 {base_w}x{base_h} 不一致；"
+            "把遮罩裁到相同尺寸并保留 alpha 通道后重试。"
+        )
+
+
+def write_run_manifest(outdir, records, extra=None):
+    """把本次运行写成 JSON 清单，便于复现与后续 agent 汇报。"""
+    if not records:
+        return None
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    target_dir = Path(outdir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
+        "endpoint_base": os.environ.get("IMAGE_API_BASE", ""),
+        "saved_total": sum(len(r.get("saved") or []) for r in records),
+        "runs": records,
+    }
+    if extra:
+        manifest.update(extra)
+    path = target_dir / f"run-{stamp}.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return path
 
 # ----------------------------------------------------------------------------- request builders
 
@@ -524,14 +896,18 @@ BARE_URL_RE = re.compile(r"https?://[^\s\"')]+\.(?:png|jpe?g|webp|gif)", re.I)
 
 
 def extract_images(obj):
-    """递归扫描任意 JSON，抽出所有图片。返回 [('b64'|'url', payload), ...] 去重。"""
+    """递归扫描任意 JSON，抽出所有图片。返回 [('b64'|'url', payload), ...]。
+
+    只按完整内容去重：同一 URL 被响应重复回显很常见，但不能因为前缀相同就
+    吞掉真正不同的图片。
+    """
     found = []
     _walk(obj, found, parent_key=None)
     seen, out = set(), []
     for kind, val in found:
-        k = (kind, val[:64])
-        if k not in seen:
-            seen.add(k)
+        key = (kind, hashlib.sha256(val.encode("utf-8")).hexdigest())
+        if key not in seen:
+            seen.add(key)
             out.append((kind, val))
     return out
 
@@ -579,28 +955,106 @@ def clean_b64(s):
 
 
 def sniff_ext(raw):
-    if raw[:8] == b"\x89PNG\r\n\x1a\n":
-        return ".png"
-    if raw[:3] == b"\xff\xd8\xff":
-        return ".jpg"
-    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
-        return ".webp"
-    if raw[:6] in (b"GIF87a", b"GIF89a"):
-        return ".gif"
-    return ".png"
+    mime = sniff_input_mime(raw)
+    return EXT_BY_MIME.get(mime, ".png")
 
 
-def save_image(kind, payload, out_base, timeout):
+def save_image(kind, payload, out_base, timeout, auth=None):
+    """保存并校验图片字节；返回可直接写进运行清单的元信息。
+
+    产物是中转自己域名下的图片时带上 Authorization（很多中转的存储做了防盗链）；
+    第三方对象存储域名一律不带，避免把中转 Key 转发出去。
+    """
     if kind == "b64":
         raw = base64.b64decode(clean_b64(payload))
+        origin = "b64_json"
     else:
-        raw = http_get_bytes(payload, timeout)
-    ext = sniff_ext(raw)
+        headers = None
+        if auth and auth[1] and _same_origin(payload, auth[0]):
+            headers = {"Authorization": f"Bearer {auth[1]}"}
+        try:
+            raw = http_get_bytes(payload, timeout, headers)
+        except urllib.error.HTTPError as error:
+            host = urllib.parse.urlparse(payload).hostname or "?"
+            third_party = not (auth and _same_origin(payload, auth[0]))
+            hint = ""
+            if third_party and error.code in (401, 403):
+                hint = (
+                    "；该链接由上游直出且需要上游鉴权，中转没有代理该产物，"
+                    "客户端取不到：换用 gpt-image-2 等产物经中转代理的模型，"
+                    "或让中转开启产物转发"
+                )
+            raise ValueError(
+                f"下载图片失败 HTTP {error.code}（host={host}，"
+                f"{'已带' if headers else '未带'}鉴权头{hint}）"
+            ) from error
+        origin = "url"
+    if not raw:
+        raise ValueError("图片内容为空")
+    mime = sniff_input_mime(raw)
+    if not mime:
+        snippet = raw[:160].decode("utf-8", "replace").strip()
+        raise ValueError(f"返回内容不是图片（可能是错误页、防盗链或过期链接）：{snippet}")
+    ext = EXT_BY_MIME[mime]
     out_path = out_base.with_suffix(ext)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
         f.write(raw)
-    return out_path, len(raw)
+    width, height = probe_image_size(raw)
+    return {
+        "path": str(out_path.resolve()),
+        "bytes": len(raw),
+        "mime": mime,
+        "width": width,
+        "height": height,
+        "has_alpha": png_has_alpha(raw) if mime == "image/png" else None,
+        "sha256": hashlib.sha256(raw).hexdigest()[:16],
+        "origin": origin,
+    }
+
+
+def png_has_alpha(raw):
+    """只读 PNG 的 IHDR color type 判断是否带 alpha 通道（不解码像素）。"""
+    if len(raw) < 26 or raw[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    return raw[25] in (4, 6)
+
+
+def verify_requested_params(requested, saved):
+    """对比请求参数与实际产物，返回未生效项说明。
+
+    中转普遍只实现了一部分参数：请求了 size/background/output_format 却拿回
+    别的东西时，必须如实告知，不要让 agent 以为参数生效了。
+    """
+    problems = []
+    if not saved:
+        return problems
+    first = saved[0]
+    size = str(requested.get("size") or "").lower()
+    if "x" in size:
+        try:
+            want_w, want_h = (int(part) for part in size.split("x", 1))
+        except ValueError:
+            want_w = want_h = None
+        actual = (first.get("width"), first.get("height"))
+        if want_w and want_h and actual[0] and actual != (want_w, want_h):
+            problems.append(
+                f"请求 size={size}，实际 {actual[0]}x{actual[1]}：中转没有按 size 出图"
+            )
+    fmt = requested.get("output_format")
+    if fmt:
+        want_mime = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}[fmt]
+        if first.get("mime") and first["mime"] != want_mime:
+            problems.append(
+                f"请求 output_format={fmt}，实际 {first['mime']}：中转忽略了输出格式"
+            )
+    if requested.get("background") == "transparent" and first.get("has_alpha") is False:
+        problems.append("请求 background=transparent，实际是无 alpha 通道的 RGB：中转不支持透明底")
+    if requested.get("quality") is not None:
+        problems.append(
+            f"quality={requested['quality']} 无法从产物验证；实测部分中转直接忽略该参数"
+        )
+    return problems
 
 # ----------------------------------------------------------------------------- debug
 
@@ -636,12 +1090,71 @@ def sanitize(obj, limit=180, secrets_to_hide=()):
 
 # ----------------------------------------------------------------------------- 单 provider 执行
 
-def run_one(prov, prompt, args, single_target=True):
+def explain_error(status, snippet, model):
+    """把常见中转报错翻译成可执行的下一步，返回提示行列表。"""
+    lowered = snippet.lower()
+    hints = []
+    if "images endpoint requires an image model" in lowered:
+        hints.append(
+            "model 必须是 Sub2 图片别名：gpt-image-gemini-flash / "
+            "gpt-image-gemini-pro / gpt-image-2。"
+        )
+    if "model_not_found" in lowered or "model not found" in lowered:
+        hints.append(
+            f"中转没有开通 {model}；改用 --provider banana，"
+            "或让中转管理员确认该模型渠道。"
+        )
+    if "no available compatible accounts" in lowered or "无可用渠道" in snippet:
+        hints.append("当前分组没有可调度渠道：稍后重试，或换另一个 provider。")
+    if "insufficient" in lowered or "quota" in lowered or "余额" in snippet:
+        hints.append("中转余额/额度不足；充值后再跑，不要靠换模型硬试。")
+    if status in (401, 403):
+        hints.append("检查 GENIMG_API_KEY 是否有效、是否属于该中转站。")
+    if status == 413:
+        hints.append("请求体过大：减少 --image 张数，或先压缩参考图。")
+    if status in (502, 504):
+        hints.append(
+            "中转网关 502/504（上游过载或超时）：脚本已自动退避重试；仍失败说明上游持续"
+            "异常，稍后再试，或降 --size / 稍后换时段。"
+        )
+    elif status in RETRYABLE_HTTP_STATUSES:
+        hints.append("已按 2/4/8 秒退避重试 3 次仍失败；稍后再试。")
+    policy_markers = (
+        "content_policy", "policy_violation", "policy_refusal", "moderation",
+        "refusal", "inhaltsrichtlinien", "inappropriate", "审核",
+    )
+    if any(marker in lowered for marker in policy_markers):
+        hints.append(
+            "上游内容审核拒绝（部分模型策略更严，报错可能是外语原文）："
+            "换一种描述或去掉可能敏感的词后重试，同一提示词不要连刷；"
+            "需要稳定出图时用 --model gpt-image-2。"
+        )
+    return hints
+
+
+def run_one(prov, prompt, args, single_target=True, name_tag=""):
+    """执行单个 provider 的一次生成/编辑，返回运行记录（含保存结果）。"""
     label = prov["name"]
+    started = time.monotonic()
     is_edit = bool(args.image)
     request_endpoint = EDIT_ENDPOINT if is_edit else GENERATION_ENDPOINT
     if args.mask and not is_edit:
         raise ValueError("--mask 只能与 --image 图片编辑一起使用。")
+
+    record = {
+        "provider": label,
+        "model": prov["model"],
+        "operation": "edit" if is_edit else "generate",
+        "prompt": prompt,
+        "requested": {
+            key: value
+            for key, value in prov["request_options"].items()
+            if value is not None
+        },
+        "saved": [],
+        "error": None,
+        "elapsed_s": 0.0,
+    }
 
     if is_edit:
         url = join_url(prov["base_url"], request_endpoint)
@@ -663,13 +1176,12 @@ def run_one(prov, prompt, args, single_target=True):
         if args.dry_run:
             request_data = None
             content_type = "multipart/form-data; boundary=<generated-at-send-time>"
-            prepared_images = []
-            prepared_mask = None
             input_debug = [describe_image_input(value) for value in args.image]
             mask_debug = describe_image_input(args.mask) if args.mask else None
         else:
             prepared_images = [load_image_input(value, args.timeout) for value in args.image]
             prepared_mask = load_image_input(args.mask, args.timeout) if args.mask else None
+            check_mask_dimensions(prepared_images, prepared_mask)
             request_data, content_type = build_multipart(
                 fields, prepared_images, prepared_mask
             )
@@ -679,6 +1191,7 @@ def run_one(prov, prompt, args, single_target=True):
                     "filename": item["filename"],
                     "mime": item["mime"],
                     "bytes": len(item["data"]),
+                    "size": describe_dimensions(item["width"], item["height"]),
                 }
                 for item in prepared_images
             ]
@@ -688,6 +1201,9 @@ def run_one(prov, prompt, args, single_target=True):
                     "filename": prepared_mask["filename"],
                     "mime": prepared_mask["mime"],
                     "bytes": len(prepared_mask["data"]),
+                    "size": describe_dimensions(
+                        prepared_mask["width"], prepared_mask["height"]
+                    ),
                 }
                 if prepared_mask else None
             )
@@ -697,6 +1213,8 @@ def run_one(prov, prompt, args, single_target=True):
             "image": input_debug,
             "mask": mask_debug,
         }
+        record["input_images"] = input_debug
+        record["mask"] = mask_debug
     else:
         url = join_url(prov["base_url"], request_endpoint)
         headers = build_headers(prov["api_key"])
@@ -717,7 +1235,8 @@ def run_one(prov, prompt, args, single_target=True):
                 raise ValueError("banana 的 Pro 模型必须由用户明确指定 --model。")
         debug_body = body
 
-    operation = "edit" if is_edit else "generate"
+    record["endpoint"] = url
+    operation = record["operation"]
     print(
         f"[{label}] POST {url}  "
         f"(operation={operation}, model={prov['model']})"
@@ -727,7 +1246,8 @@ def run_one(prov, prompt, args, single_target=True):
         print(json.dumps(sanitize(debug_body, secrets_to_hide=(prov["api_key"],)), ensure_ascii=False, indent=2))
     if args.dry_run:
         print(f"[{label}] ✓ dry-run，未发送网络请求")
-        return []
+        record["elapsed_s"] = round(time.monotonic() - started, 3)
+        return record
 
     if is_edit:
         status, raw = post_with_retries(
@@ -752,56 +1272,137 @@ def run_one(prov, prompt, args, single_target=True):
         else:
             print(redact_text(raw.decode("utf-8", "replace")[:2000], (prov["api_key"],)))
 
+    record["status"] = status
+    record["elapsed_s"] = round(time.monotonic() - started, 3)
+
     if status >= 300:
         snippet = redact_text(raw.decode("utf-8", "replace")[:500], (prov["api_key"],))
         print(f"[{label}] ✗ 请求失败 HTTP {status}: {snippet}")
-        if status == 400 and "images endpoint requires an image model" in snippet.lower():
-            print(
-                f"[{label}] 检查 model：Sub2API Gemini 必须使用 "
-                "gpt-image-gemini-flash 或 gpt-image-gemini-pro，不能发送原始 Gemini 模型名。"
-            )
-        return []
+        for hint in explain_error(status, snippet, prov["model"]):
+            print(f"[{label}] → {hint}")
+        record["error"] = f"HTTP {status}: {snippet}"
+        return record
 
     if parsed is None:
         print(f"[{label}] ✗ 返回不是 JSON，无法解析。用 --debug 查看原始内容。")
-        return []
+        record["error"] = "响应不是 JSON"
+        return record
 
     images = extract_images(parsed)
     if not images:
         print(f"[{label}] ✗ 没在返回里找到图片。用 --debug 查看响应结构。")
-        return []
+        record["error"] = "响应中没有图片"
+        return record
 
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    saved = []
+    multi = len(images) > 1
     for i, (kind, payload) in enumerate(images):
-        if args.out and len(images) == 1 and single_target:
-            out_base = Path(args.out)
+        suffix = f"_{i}" if multi else ""
+        if args.out:
+            base = Path(args.out)
+            provider_tag = "" if single_target else f"_{label}"
+            out_base = base.with_name(base.stem + provider_tag + name_tag + suffix)
         else:
-            suffix = f"_{i}" if len(images) > 1 else ""
-            out_base = Path(args.outdir) / f"{label}_{stamp}{suffix}"
+            out_base = Path(args.outdir) / f"{label}{name_tag}_{stamp}{suffix}"
         try:
-            path, nbytes = save_image(kind, payload, out_base, args.timeout)
-            print(f"[{label}] ✓ 保存 {path}  ({nbytes // 1024} KB, 来源 {kind})")
-            saved.append(str(path))
+            info = save_image(
+                kind, payload, out_base, args.timeout,
+                auth=(prov["base_url"], prov["api_key"]),
+            )
+            print(
+                f"[{label}] ✓ 保存 {info['path']}  "
+                f"({describe_dimensions(info['width'], info['height'])}, "
+                f"{info['mime']}, {info['bytes'] // 1024} KB, 来源 {kind})"
+            )
+            record["saved"].append(info)
         except Exception as e:
             print(f"[{label}] ✗ 保存失败: {e}")
-    return saved
+            record["error"] = f"保存失败: {e}"
+
+    warnings = verify_requested_params(prov["request_options"], record["saved"])
+    if warnings:
+        record["parameter_warnings"] = warnings
+        for warning in warnings:
+            print(f"[{label}] ⚠ {warning}")
+    record["elapsed_s"] = round(time.monotonic() - started, 3)
+    print(f"[{label}] 耗时 {record['elapsed_s']}s")
+    return record
+
 
 # ----------------------------------------------------------------------------- main
 
+def read_prompt_file(path):
+    """从文本文件读取多条提示词：一行一条，忽略空行和 # 注释行。"""
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise ValueError(f"--prompt-file 不存在：{path}")
+    prompts = []
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        prompts.append(line)
+    if not prompts:
+        raise ValueError(f"--prompt-file 里没有有效提示词：{path}")
+    return prompts
+
+
+def run_provider(name, config, args, prompt, single_target, name_tag):
+    """解析单个 provider 并执行；所有异常都转成带 label 的失败记录。"""
+    try:
+        prov = resolve_provider(name, config, args)
+    except ValueError as e:
+        print(f"[{name}] ✗ {e}")
+        return None
+    try:
+        return run_one(prov, prompt, args, single_target=single_target, name_tag=name_tag)
+    except urllib.error.URLError as e:
+        print(f"[{name}] ✗ 网络错误: {e}")
+    except Exception as e:
+        print(f"[{name}] ✗ 出错: {e}")
+    return None
+
+
+def run_all(names, config, args, prompt, name_tag=""):
+    """按 --jobs 并发执行多个 provider，结果按 providers 声明顺序返回。"""
+    single_target = len(names) == 1
+    jobs = max(1, int(getattr(args, "jobs", 1) or 1))
+    if jobs == 1 or len(names) == 1:
+        results = [
+            (name, run_provider(name, config, args, prompt, single_target, name_tag))
+            for name in names
+        ]
+        return results
+
+    ordered = {}
+    with _futures.ThreadPoolExecutor(max_workers=min(jobs, len(names))) as pool:
+        futures = {
+            pool.submit(
+                run_provider, name, config, args, prompt, single_target, name_tag
+            ): name
+            for name in names
+        }
+        for future in _futures.as_completed(futures):
+            ordered[futures[future]] = future.result()
+    return [(name, ordered.get(name)) for name in names]
+
+
 def main(argv=None):
+    configure_stdio()
     p = argparse.ArgumentParser(
         prog="genimg",
         description="跨平台 Sub2API 图片生成与编辑 CLI。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("prompt", nargs="?", help="生图提示词")
+    p.add_argument("--prompt-file", dest="prompt_file",
+                   help="从文件批量读取提示词，一行一条（忽略空行和 # 注释）")
     p.add_argument("--provider", "-p", default="banana",
                    help="provider 名，逗号分隔可同时多个；'all' 表示配置里全部。默认 banana")
     p.add_argument("--image", "-i", action="append", default=[],
                    help="输入图：本地路径、图片 URL、Data URL 或 Base64；可重复")
-    p.add_argument("--mask", help="编辑遮罩图；仅与 images mode 的 --image 一起使用")
-    p.add_argument("--out", "-o", help="单张输出时的文件名")
+    p.add_argument("--mask", help="编辑遮罩图；仅与 --image 图片编辑一起使用，尺寸须与第一张输入图一致")
+    p.add_argument("--out", "-o", help="输出文件名；多图/多 provider 时自动加序号后缀")
     p.add_argument("--outdir", default="output", help="输出目录，默认 ./output")
     p.add_argument("--model", "-m", help="覆盖模型名")
     p.add_argument("--size", help="尺寸，如 1024x1024 或 1536x1024")
@@ -819,10 +1420,22 @@ def main(argv=None):
     p.add_argument("--style", choices=["vivid", "natural"], help="风格（仅 DALL-E 3）")
     p.add_argument("--user", help="终端用户标识（OpenAI Images）")
     p.add_argument("--n", type=int, default=None, help="生成数量（images；默认 1）")
+    p.add_argument("--jobs", type=int, default=1,
+                   help="多 provider 并发数，默认 1（串行）")
     p.add_argument("--timeout", type=int, default=180, help="超时秒数，默认 180")
     p.add_argument("--config", help="指定 providers 配置文件")
     p.add_argument("--param", action="append", default=[], metavar="KEY=VALUE",
                    help="追加/覆盖自定义 JSON 请求字段，可重复，支持 a.b=value")
+    p.add_argument("--list-models", dest="list_models", action="store_true",
+                   help="向中转查询账号可用的生图模型（免费，不生成图片）")
+    p.add_argument("--pick-model", dest="pick_model", action="store_true",
+                   help="交互式选择模型（仅终端；非交互环境自动跳过）")
+    p.add_argument("--refresh-models", dest="refresh_models", action="store_true",
+                   help="忽略缓存的模型列表，重新向中转查询")
+    p.add_argument("--no-discover", dest="no_discover", action="store_true",
+                   help="不查询 /models，直接用配置的默认模型")
+    p.add_argument("--no-manifest", dest="no_manifest", action="store_true",
+                   help="不写 run-<时间戳>.json 运行清单")
     p.add_argument("--no-proxy", dest="no_proxy", action="store_true",
                    help="强制直连，忽略系统代理（本地中转站/代理拦截时用）")
     p.add_argument("--debug", action="store_true", help="打印原始返回结构")
@@ -833,12 +1446,18 @@ def main(argv=None):
 
     if args.n is not None and not 1 <= args.n <= 10:
         p.error("--n 必须在 1 到 10 之间")
+    if args.jobs < 1:
+        p.error("--jobs 必须大于等于 1")
     if args.output_compression is not None and not 0 <= args.output_compression <= 100:
         p.error("--output-compression 必须在 0 到 100 之间")
+    if args.prompt and args.prompt_file:
+        p.error("提示词和 --prompt-file 只能二选一")
     try:
         args.param_body = parse_param_assignments(args.param)
     except ValueError as e:
         p.error(str(e))
+    if args.mask and not args.image:
+        p.error("--mask 必须与 --image 一起使用")
 
     setup_proxy(args.no_proxy)
     config, cfg_path = load_config(args.config)
@@ -856,7 +1475,58 @@ def main(argv=None):
                 )
         return 0
 
-    if not args.prompt:
+    # ---- 模型发现：默认自动查询（带缓存），失败就回退配置默认，绝阻塞出图
+    args.available_models = None
+    env_base = os.environ.get("IMAGE_API_BASE")
+    env_key = os.environ.get("GENIMG_API_KEY")
+    want_discovery = args.list_models or (
+        not args.no_discover and env_base and (env_key or not args.dry_run)
+    )
+    if want_discovery and not env_base:
+        print(
+            "未设置 IMAGE_API_BASE，查不到模型列表。先执行：\n"
+            "  export IMAGE_API_BASE='https://你的中转站/v1'\n"
+            "  export GENIMG_API_KEY='sk-xxx'"
+        )
+        if args.list_models:
+            return 1
+        want_discovery = False
+    if want_discovery:
+        names_avail, discovery_error, from_cache = discover_models(
+            env_base or "",
+            env_key,
+            outdir=args.outdir,
+            refresh=args.refresh_models,
+        )
+        args.available_models = names_avail
+        if args.list_models:
+            print_model_list(names_avail, discovery_error, args.outdir)
+            return 0 if names_avail is not None else 1
+        if names_avail is None:
+            print(f"[model] 查询模型列表失败（{discovery_error}），按配置默认模型继续。")
+        else:
+            salt = "（缓存）" if from_cache else ""
+            images = [n for n in names_avail if looks_like_image_model(n)]
+            print(
+                f"[model] 账号可用模型 {len(names_avail)} 个，疑似生图 {len(images)} 个{salt}"
+            )
+            if args.pick_model:
+                picked = interactive_pick_model(names_avail)
+                if picked:
+                    args.model = picked
+                    print(f"[model] 手动选定：{picked}")
+    elif args.list_models:
+        print("需要 IMAGE_API_BASE 才能查询模型列表。")
+        return 1
+
+    if args.prompt_file:
+        try:
+            prompts = read_prompt_file(args.prompt_file)
+        except ValueError as e:
+            p.error(str(e))
+    elif args.prompt:
+        prompts = [args.prompt]
+    else:
         p.error("缺少提示词。示例: python genimg.py \"一只柴犬\" --provider banana")
 
     # 解析目标 provider 列表
@@ -865,21 +1535,27 @@ def main(argv=None):
     else:
         names = [x.strip() for x in args.provider.split(",") if x.strip()]
 
-    all_saved = []
+    records = []
     completed_runs = 0
-    for name in names:
-        try:
-            prov = resolve_provider(name, config, args)
-        except ValueError as e:
-            print(f"[{name}] ✗ {e}")
-            continue
-        try:
-            all_saved.extend(run_one(prov, args.prompt, args, single_target=len(names) == 1))
-            completed_runs += 1
-        except urllib.error.URLError as e:
-            print(f"[{name}] ✗ 网络错误: {e}")
-        except Exception as e:
-            print(f"[{name}] ✗ 出错: {e}")
+    for index, prompt in enumerate(prompts):
+        name_tag = f"_p{index + 1}" if len(prompts) > 1 else ""
+        if len(prompts) > 1:
+            print(f"[batch] 第 {index + 1}/{len(prompts)} 条提示词")
+        for name, record in run_all(names, config, args, prompt, name_tag):
+            if record is None:
+                continue
+            records.append(record)
+            if record.get("error") is None:
+                completed_runs += 1
+
+    saved = [item for record in records for item in (record.get("saved") or [])]
+    manifest_path = None
+    if records and not args.no_manifest and not args.dry_run:
+        manifest_path = write_run_manifest(
+            args.outdir,
+            records,
+            extra={"providers": names, "prompt_count": len(prompts)},
+        )
 
     print("-" * 40)
     if args.dry_run:
@@ -888,12 +1564,26 @@ def main(argv=None):
             return 0
         print("dry-run 失败，没有构建出任何请求。")
         return 1
-    if all_saved:
-        print(f"完成，共保存 {len(all_saved)} 张:")
-        for s in all_saved:
-            print(f"  {s}")
+    if saved:
+        print(f"完成，共保存 {len(saved)} 张:")
+        for item in saved:
+            print(
+                f"  {item['path']}  "
+                f"({describe_dimensions(item['width'], item['height'])}, "
+                f"{item['mime']}, {item['bytes'] // 1024} KB)"
+            )
+        if manifest_path:
+            print(f"运行清单：{manifest_path}")
         return 0
     print("未生成任何图片。")
+    for record in records:
+        if record.get("error"):
+            print(f"  - {record['provider']}: {record['error']}")
+    if not os.environ.get("IMAGE_API_BASE") or not os.environ.get("GENIMG_API_KEY"):
+        print(
+            "配置未完成。设置 IMAGE_API_BASE 与 GENIMG_API_KEY 后，"
+            "先跑 `--list-models` 免费自检。"
+        )
     return 1
 
 

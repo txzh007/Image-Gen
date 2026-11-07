@@ -221,7 +221,33 @@ def upload_file(file_path, service='catbox', api_key=None):
         raise Exception(f"不支持的图床服务: {service}")
 
 
+def configure_stdio():
+    """统一 stdout/stderr 编码。
+
+    Windows 控制台默认按本地代码页（cp936/cp1252）解码，输出里的中文和
+    ✓ ✗ ⚠ → 轻则乱码、重则 UnicodeEncodeError 直接崩。这里统一改成 UTF-8
+    并对无法编码的字符降级替换，保证任何终端下都不中断。
+    """
+    original = (getattr(sys.stdout, "encoding", "") or "").lower()
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (LookupError, ValueError, OSError):
+            continue
+    if original and original.replace("-", "") not in ("utf8", "utf8mb4"):
+        if sys.platform.startswith("win"):
+            print(
+                "[提示] Windows 终端若显示乱码，先执行 chcp 65001，"
+                "或改用 Windows Terminal / PowerShell 7。",
+                file=sys.stderr,
+            )
+
+
 def main():
+    configure_stdio()
     import argparse
 
     parser = argparse.ArgumentParser(
