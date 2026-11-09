@@ -61,6 +61,18 @@ class VideoRequestTests(unittest.TestCase):
         self.assertEqual("task-a", genvideo.extract_task_id({"task_id": "task-a"}))
         self.assertEqual("task-b", genvideo.extract_task_id({"id": "task-b"}))
 
+    def test_extract_task_id_accepts_request_id_and_nested(self):
+        self.assertEqual(
+            "req-1", genvideo.extract_task_id({"request_id": "req-1"})
+        )
+        self.assertEqual(
+            "vid-9", genvideo.extract_task_id({"data": {"video_id": "vid-9"}})
+        )
+        self.assertEqual(
+            "out-3", genvideo.extract_task_id({"result": {"task_id": "out-3"}})
+        )
+        self.assertIsNone(genvideo.extract_task_id({"unrelated": 1}))
+
     def test_extract_video_url_accepts_result_shapes(self):
         self.assertEqual(
             "https://example.com/a.mp4",
@@ -258,6 +270,57 @@ class OpenAIVideoProtocolTests(unittest.TestCase):
             genvideo.build_openai_video_body(
                 None, "x", videos=["https://example.com/a.mp4"]
             )
+
+
+class SuccessStateTests(unittest.TestCase):
+    def test_done_and_completed_are_both_success(self):
+        # xAI/Grok 媒体渠道返回 done；OpenAI 返回 completed
+        self.assertIn("done", genvideo.SUCCESS_STATES)
+        self.assertIn("completed", genvideo.SUCCESS_STATES)
+
+    def test_wait_for_task_returns_on_done_state(self):
+        args = types.SimpleNamespace(
+            wait_timeout=30, poll_interval=1, request_timeout=5, debug=False
+        )
+        payloads = [
+            {"status": "in_progress", "progress": 40},
+            {"status": "done", "progress": 100},
+        ]
+
+        def fake_http_json(method, url, headers, body=None, timeout=60):
+            data = payloads.pop(0)
+            return 200, data, b""
+
+        with mock.patch.object(genvideo, "http_json", side_effect=fake_http_json):
+            result = genvideo.wait_for_task(
+                "https://x/v1", "/videos", "task-1", {}, args
+            )
+        self.assertEqual("done", result["status"])
+
+    def test_failure_states_still_raise(self):
+        args = types.SimpleNamespace(
+            wait_timeout=30, poll_interval=1, request_timeout=5, debug=False
+        )
+        with mock.patch.object(
+            genvideo, "http_json",
+            return_value=(200, {"status": "failed", "error": "boom"}, b""),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                genvideo.wait_for_task("https://x/v1", "/videos", "t", {}, args)
+
+
+class UsageRecordingTests(unittest.TestCase):
+    def test_completed_entry_keeps_upstream_usage(self):
+        # 这里只验证字段被保留：record_task 是纯 append，直接看写入内容
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "tasks.jsonl"
+            genvideo.record_task(
+                log,
+                {"task_id": "t1", "status": "completed",
+                 "usage": {"cost_in_usd_ticks": 2500000000}},
+            )
+            entry = genvideo.read_task_entries(log)[0]
+        self.assertEqual(2500000000, entry["usage"]["cost_in_usd_ticks"])
 
 
 if __name__ == "__main__":

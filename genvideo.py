@@ -31,7 +31,10 @@ OPENAI_VIDEO_SIZE_SET = {"720x1280", "1280x720", "1024x1792", "1792x1024"}
 OPENAI_VIDEO_SECONDS = ("4", "8", "12")
 DEFAULT_ENDPOINT = "/videos"
 TERMINAL_FAILURE_STATES = {"failed", "cancelled", "canceled", "expired"}
-TERMINAL_STATES = TERMINAL_FAILURE_STATES | {"completed"}
+# 不同中转/上游对「成功」的叫法不一样：官方 OpenAI 用 completed，
+# xAI/Grok 媒体渠道返回 done，其它还有 succeeded/finished/ready 等。
+SUCCESS_STATES = {"completed", "done", "succeeded", "success", "finished", "ready"}
+TERMINAL_STATES = TERMINAL_FAILURE_STATES | SUCCESS_STATES
 TASK_LOG_NAME = ".genvideo-tasks.jsonl"
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_DELAYS = (2, 4)
@@ -375,10 +378,24 @@ def explain_create_error(status, parsed, raw):
     return None
 
 
+# 不同中转给任务标识起的名字不一样，按优先级依次尝试。
+TASK_ID_FIELDS = ("task_id", "request_id", "video_id", "job_id", "taskId", "id")
+
+
 def extract_task_id(payload):
     if not isinstance(payload, dict):
         return None
-    return payload.get("task_id") or payload.get("id")
+    for field in TASK_ID_FIELDS:
+        value = payload.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for wrapper in ("data", "result", "task", "video", "output"):
+        inner = payload.get(wrapper)
+        if isinstance(inner, dict):
+            nested = extract_task_id(inner)
+            if nested:
+                return nested
+    return None
 
 
 def extract_video_url(payload):
@@ -426,7 +443,7 @@ def wait_for_task(base_url, endpoint, task_id, headers, args):
         if args.debug:
             print(json.dumps(sanitize(payload), ensure_ascii=False, indent=2))
 
-        if state == "completed":
+        if state in SUCCESS_STATES:
             return payload
         if state in TERMINAL_FAILURE_STATES:
             detail = payload.get("error") or payload.get("message") or "未知错误"
@@ -842,17 +859,20 @@ def main(argv=None):
         media = describe_media(path)
         print(f"[video] ✓ 保存 {path} ({size // 1024} KB)")
         print(f"[video] 媒体信息：{media}")
-        record_task(
-            log_path,
-            {
-                "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
-                "task_id": task_id,
-                "status": "completed",
-                "out": str(path),
-                "bytes": size,
-                "media": media,
-            },
-        )
+        entry = {
+            "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
+            "task_id": task_id,
+            "status": "completed",
+            "out": str(path),
+            "bytes": size,
+            "media": media,
+        }
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        if usage:
+            # 上游可能回传计费信息（如 cost_in_usd_ticks），原样记录便于对账
+            entry["usage"] = usage
+            print(f"[video] 上游用量：{json.dumps(usage, ensure_ascii=False)}")
+        record_task(log_path, entry)
         return 0
     except KeyboardInterrupt:
         print(f"\n[video] 已停止等待，任务仍可续查：python3 genvideo.py --task-id {task_id}")

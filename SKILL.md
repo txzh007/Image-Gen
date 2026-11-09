@@ -363,6 +363,25 @@ python3 genvideo.py "让这张图动起来" --protocol openai \
 `openai` 协议下多张参考图、视频/音频参考、非 4/8/12 秒都会被本地直接拒绝并说明原因 ——
 这些是协议限制，不是脚本限制。中转只支持其中一种协议时，换 `--protocol` 即可，不用改代码。
 
+### 中转返回形状（实测，grok-imagine-video）
+
+创建只返回一个 ID，没有 status：
+
+```json
+{"request_id": "4be42438-6de2-9276-8cc5-7123b04e21f7"}
+```
+
+轮询到完成时：
+
+```json
+{"model":"grok-imagine-video","progress":100,"status":"done",
+ "usage":{"cost_in_usd_ticks":2500000000},
+ "video":{"duration":5,"url":"/v1/videos/<id>/content"}}
+```
+
+注意两点：成功状态是 **`done`**（不是 `completed`），任务 ID 字段是 **`request_id`**。脚本
+对这两类差异都已兼容，并把 `usage` 原样记进任务记录，方便和后台账单对账。
+
 **任务记录**：创建成功后立刻把 `task_id`、模型、时长、提示词写进输出目录的
 `.genvideo-tasks.jsonl`（`--log-file` 可改），完成/失败也会追加一条。中断、超时、
 上下文丢失后一律 `--task-id` 或 `--resume-last` 续查，不要重新创建。
@@ -387,6 +406,8 @@ python3 genvideo.py "让这张图动起来" --protocol openai \
 | 413 | 减少 `--image` 张数或先压缩参考图 |
 | 下载结果不是图片/MP4 | 链接过期或防盗链，重新生成或续查，不要落盘假文件 |
 | 视频等待超时 | 保留 task_id，`--task-id` 续查 |
+| 创建成功但日志说「没有 task_id」 | 中转的任务标识字段可能是 `task_id`/`request_id`/`video_id`/`job_id`/`id`，脚本已全部识别；若是新名字，用 `--debug` 看原始响应 |
+| 视频一直「等待中」不结束 | 部分渠道成功状态是 `done` 而非 `completed`，脚本已兼容 done/succeeded/finished/ready；若仍未结束，`--list-tasks` 拿 task_id 后手动查一次状态 |
 
 排查用 `--debug`；它已对 Key、Base64、Data URL 去敏，不要自己打印完整 Key。
 下载视频时不要把中转 Authorization 头转发给第三方对象存储地址。

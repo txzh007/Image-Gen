@@ -13,6 +13,8 @@
 - 每次运行落一份 JSON 清单：参数、路径、宽高、格式、sha256、耗时。
 - 即梦/Seedance 异步视频创建、续查、下载，任务 ID 自动持久化。
 - 有 `ffprobe` 时自动校验视频分辨率与时长。
+- 兼容不同中转的返回差异：任务 ID 认 `task_id`/`request_id`/`video_id`/`job_id`/`id`，
+  成功状态认 `completed`/`done`/`succeeded` 等；上游回传的 `usage` 会计入任务记录。
 - 可选的本地视频素材图床上传。
 
 所有模型请求都经过你的 Sub2 中转。Skill 只需要 Sub2 用户 Key，不接触上游 Key。
