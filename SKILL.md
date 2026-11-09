@@ -49,6 +49,11 @@ export GENIMG_API_KEY="sk-xxx"
 不读取配置文件里的地址/Key，不读取上游 Key，不使用 `--base-url`、`--api-key` 绕开
 中转（`genvideo.py` 传这两个参数会直接报错退出）。
 
+**这两个变量缺任何一个都出不了图。缺的时候直接向用户索要「中转地址 + Key」这两项，不要
+猜测、不要跳过、不要改用其它接口或直连上游。** 拿到后写进用户的 shell 配置
+（zsh → `~/.zshrc`，bash → `~/.bashrc`，Windows → `$PROFILE`）并在当前会话 export，
+这样用户下次不用再给；配置文件不可写时就在每条命令前 export，并提醒用户自行持久化。
+
 **Windows**：把示例里的 `python3` 换成 `python`；终端显示乱码时先 `chcp 65001` 或用
 Windows Terminal。三个脚本已统一 stdout/stderr 为 UTF-8 并对不可编码字符降级，不会因代码页
 中断，可以放心跑。

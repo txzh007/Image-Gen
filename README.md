@@ -52,31 +52,29 @@ $env:GENIMG_REPO="https://github.com/txzh007/Image-Gen.git"
 - `~/.claude/skills/genimg`
 - `~/.opencode/skills/genimg`
 
-## 一句话上手（交给 agent）
+## 交给 agent：一句话
 
-装好后把下面这句丢给 Codex / Claude Code / OpenCode，agent 会自己读 skill、跑自检、
-缺配置时向你索要，然后出图：
-
-> 读 `~/.codex/skills/genimg/SKILL.md` 并照做：先跑 `genimg.py --list-models` 自检；
-> 缺 `IMAGE_API_BASE` 或 `GENIMG_API_KEY` 就向我要，拿到后 export 再重试；能列出模型就
-> 问我画什么、多大尺寸，出图后把模型、绝对路径和实际尺寸报给我。
-
-路径按平台换：Claude Code 用 `~/.claude/skills/genimg/SKILL.md`，OpenCode 用
-`~/.opencode/skills/genimg/SKILL.md`；Windows 把 `~` 换成 `$env:USERPROFILE`、
-`python3` 换成 `python`。
-
-agent 照做时会经历两次状态，都是正常输出，不是报错：
+装都没装也行，整段丢给 Codex / Claude Code / OpenCode：
 
 ```text
-# 还没配置
-未设置 IMAGE_API_BASE，查不到模型列表。先执行：
-  export IMAGE_API_BASE='https://你的中转站/v1'
-  export GENIMG_API_KEY='sk-xxx'
-
-# 配置好后
-账号可用模型 4 个，其中疑似生图模型 4 个：
-  1) gpt-image-2  ← 已知
+把这个生图 skill 装上并帮我出图：https://github.com/txzh007/Image-Gen.git
+缺什么配置你自己读 skill 后问我要。
 ```
+
+**这句话里没有出现任何变量名** —— 配置要求由 skill 自己交代。agent 读完会依次知道：
+
+1. 需要两个环境变量 `IMAGE_API_BASE` + `GENIMG_API_KEY`（SKILL.md「配置」）
+2. 缺了要主动向用户索要、并写进 shell 配置（同上）
+3. 用 `--list-models` 免费自检（SKILL.md「先确认能不能用」）
+4. 按「生图参数设置」四步法选尺寸和模型
+
+已经装好了，只用后半句：
+
+```text
+读 ~/.codex/skills/genimg/SKILL.md，按它说的自检、缺配置问我要、然后出图。
+```
+
+Windows 把 `~` 换成 `$env:USERPROFILE`、`python3` 换成 `python`，安装用 `install.ps1`。
 
 ## 配置
 
