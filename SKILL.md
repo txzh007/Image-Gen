@@ -335,6 +335,33 @@ python3 genvideo.py --list-tasks
 
 默认 `video-ds-2.0-fast`；用户明确要标准版才用 `video-ds-2.0`。
 
+### 时长与分辨率：两组字段，实测哪组有效
+
+中转对这两个维度有两套字段写法，**不能混着发**，否则可能被忽略：
+
+| 维度 | 写法 A（旧，默认） | 写法 B（实测有效） |
+|---|---|---|
+| 时长 | `--seconds 5` → `"seconds":"5"`（字符串） | `--duration 5` → `"duration":5`（**数字**） |
+| 尺寸 | `--aspect-ratio 16:9` → `"aspect_ratio":"16:9"` | `--resolution 720p` → `"resolution":"720p"` |
+
+在 `grok-imagine-video` 上实测的差别是**实质性的**：
+
+| 请求 | 实际输出 | 上游计费 ticks |
+|---|---|---|
+| `seconds:"5"` + `aspect_ratio:"16:9"` | 848×480 | 2,500,000,000 |
+| `duration:5` + `resolution:"720p"` | **1280×720** | 3,500,000,000 |
+
+也就是说 `aspect_ratio` 只能算"大致比例"，`resolution` 才能拿到确定分辨率。要精确分辨率、
+或者要和账单对得上时，用 B 组：
+
+```bash
+python3 genvideo.py "雨夜城市上空飞行" --model grok-imagine-video \
+  --duration 5 --resolution 720p --out ./output/city.mp4
+```
+
+给了 `--duration` 就不再发 `seconds`，给了 `--resolution` 就不再发 `aspect_ratio`；
+没给则沿用 A 组默认值。
+
 ### 两种协议：`--protocol`
 
 端点骨架两种协议相同（`POST /v1/videos` → `GET /v1/videos/{id}` 轮询 → `GET

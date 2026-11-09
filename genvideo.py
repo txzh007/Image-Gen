@@ -272,6 +272,8 @@ def build_video_body(
     audios=None,
     extra_body=None,
     auto_upload=None,
+    duration=None,
+    resolution=None,
 ):
     if not prompt:
         raise ValueError("创建视频任务时必须提供提示词。")
@@ -279,12 +281,17 @@ def build_video_body(
     videos = validate_reference_urls("video", videos, auto_upload)
     audios = validate_reference_urls("audio", audios, auto_upload)
 
-    body = {
-        "model": model,
-        "prompt": prompt,
-        "seconds": str(seconds),
-        "aspect_ratio": aspect_ratio,
-    }
+    body = {"model": model, "prompt": prompt}
+    # 两种字段风格二选一：duration/resolution（数字时长 + 具名分辨率）
+    # 或 seconds/aspect_ratio。实测 duration+resolution 会直接改变输出分辨率与计费。
+    if duration is not None:
+        body["duration"] = int(duration)
+    else:
+        body["seconds"] = str(seconds)
+    if resolution:
+        body["resolution"] = resolution
+    else:
+        body["aspect_ratio"] = aspect_ratio
     if images:
         body["images"] = list(images)
     if videos:
@@ -656,6 +663,10 @@ def create_parser():
                         default=PROTOCOL_SUB2,
                         help="sub2（默认，Sub2/即梦扩展字段）或 openai（严格 OpenAI Videos API）")
     parser.add_argument("--size", help="输出宽高，openai 协议用，如 1280x720")
+    parser.add_argument("--duration", type=int,
+                        help="时长（数字），发送 duration 字段替代 seconds；实测有效")
+    parser.add_argument("--resolution",
+                        help="分辨率，如 720p / 480p / 1280x720，发送 resolution 字段替代 aspect_ratio；实测有效")
     parser.add_argument("--seconds", default=None,
                         help="视频时长；sub2 协议如 5/10/15，openai 协议只支持 4/8/12")
     parser.add_argument("--aspect-ratio", default="16:9",
@@ -791,6 +802,8 @@ def main(argv=None):
                     videos=args.video,
                     audios=args.audio,
                     auto_upload=args.auto_upload,
+                    duration=args.duration,
+                    resolution=args.resolution,
                 )
             body = deep_merge(body, param_body)
         except ValueError as error:
@@ -798,7 +811,9 @@ def main(argv=None):
         create_url = join_url(base_url, args.endpoint)
         print(
             f"[video] POST {create_url} "
-            f"(protocol={args.protocol}, model={model_name}, seconds={args.seconds})"
+            f"(protocol={args.protocol}, model={model_name}, "
+            f"{'duration=' + str(args.duration) if args.duration is not None else 'seconds=' + str(args.seconds)}, "
+            f"{'resolution=' + str(args.resolution) if args.resolution else 'aspect_ratio=' + str(args.aspect_ratio)})"
         )
         if args.debug or args.dry_run:
             print(json.dumps(sanitize(body), ensure_ascii=False, indent=2))

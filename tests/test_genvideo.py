@@ -323,5 +323,36 @@ class UsageRecordingTests(unittest.TestCase):
         self.assertEqual(2500000000, entry["usage"]["cost_in_usd_ticks"])
 
 
+class DurationResolutionTests(unittest.TestCase):
+    """实测：duration(数字) + resolution 会直接改变输出分辨率与计费。"""
+
+    def test_duration_replaces_seconds_as_number(self):
+        body = genvideo.build_video_body(
+            "grok-imagine-video", "x", duration=5, resolution="720p"
+        )
+        self.assertEqual(5, body["duration"])
+        self.assertIsInstance(body["duration"], int)
+        self.assertNotIn("seconds", body)
+
+    def test_resolution_replaces_aspect_ratio(self):
+        body = genvideo.build_video_body(
+            "grok-imagine-video", "x", duration=5, resolution="720p"
+        )
+        self.assertEqual("720p", body["resolution"])
+        self.assertNotIn("aspect_ratio", body)
+
+    def test_legacy_fields_still_default(self):
+        body = genvideo.build_video_body("video-ds-2.0-fast", "x")
+        self.assertEqual("5", body["seconds"])
+        self.assertEqual("16:9", body["aspect_ratio"])
+        self.assertNotIn("duration", body)
+        self.assertNotIn("resolution", body)
+
+    def test_duration_only_keeps_aspect_ratio(self):
+        body = genvideo.build_video_body("m", "x", duration=8)
+        self.assertEqual(8, body["duration"])
+        self.assertEqual("16:9", body["aspect_ratio"])
+
+
 if __name__ == "__main__":
     unittest.main()

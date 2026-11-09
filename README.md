@@ -307,6 +307,22 @@ Sub2。不会把 URL 或 Base64 当成普通文本字段发送。单张输入最
 
 ## 视频任务
 
+### 时长与分辨率字段
+
+| 维度 | 默认写法 | 实测更精确的写法 |
+|---|---|---|
+| 时长 | `--seconds 5` → `"seconds":"5"` | `--duration 5` → `"duration":5`（数字） |
+| 尺寸 | `--aspect-ratio 16:9` → `"aspect_ratio"` | `--resolution 720p` → `"resolution"` |
+
+`grok-imagine-video` 实测：`aspect_ratio:"16:9"` 得到 848×480；`resolution:"720p"` 得到
+**1280×720**，上游计费 ticks 也从 2.5e9 升到 3.5e9。要确定分辨率就用 `--resolution`。
+
+```bash
+python3 genvideo.py "雨夜城市" --model grok-imagine-video --duration 5 --resolution 720p
+```
+
+给了 `--duration` 不再发 `seconds`，给了 `--resolution` 不再发 `aspect_ratio`。
+
 ### 两种协议
 
 `genvideo.py` 支持两套请求字段，端点骨架相同（`POST /v1/videos` → 轮询 → `/content` 下载）：
