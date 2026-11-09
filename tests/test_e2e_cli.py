@@ -278,6 +278,21 @@ class GenvideoEndToEndTests(unittest.TestCase):
             self.assertEqual("completed", entries[-1]["status"])
             self.assertEqual("task_mock_1", entries[-1]["task_id"])
 
+    def test_list_models_shows_video_models_without_creating_task(self):
+        with MockRelay(models=["video-ds-2.0-fast", "gpt-image-2"]) as relay, \
+                tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli("genvideo.py", ["--list-models"], tmp, relay)
+            self.assertEqual(0, proc.returncode, proc.stdout)
+            self.assertIn("疑似视频模型 1 个", proc.stdout)
+            self.assertIn("video-ds-2.0-fast", proc.stdout)
+            self.assertEqual([], [r for r in relay.requests if r["method"] == "POST"])
+
+    def test_list_models_reports_missing_video_capability(self):
+        with MockRelay() as relay, tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli("genvideo.py", ["--list-models"], tmp, relay)
+            self.assertEqual(0, proc.returncode, proc.stdout)
+            self.assertIn("没有视频模型", proc.stdout)
+
     def test_list_tasks_reads_local_log_without_network(self):
         with MockRelay() as relay, tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "output" / ".genvideo-tasks.jsonl"

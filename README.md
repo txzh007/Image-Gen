@@ -277,6 +277,16 @@ Sub2。不会把 URL 或 Base64 当成普通文本字段发送。单张输入最
 
 ## 视频任务
 
+先确认账号有没有视频能力（免费，不创建任务）：
+
+```bash
+python3 genvideo.py --list-models
+```
+
+返回「没有视频模型」说明该中转分组未开通视频，图片能力不受影响。
+中转的 `/v1/models` 不区分能力类型，这里按模型名启发式判断（`video`、`seedance`、
+`kling`、`veo`、`sora`、`hailuo` 等）。
+
 ```bash
 # 默认快速模型，创建后自动轮询并下载
 python3 genvideo.py "雨夜城市上空飞行，镜头缓慢推进" \

@@ -50,6 +50,72 @@ def configure_stdio():
             )
 
 
+VIDEO_MODEL_HINTS = (
+    "video", "seedance", "veo", "sora", "kling", "hailuo", "movie", "animate",
+    "ds-2.0", "wan2", "wanx", "cogvideo", "minimax-video",
+)
+NON_VIDEO_MODEL_HINTS = (
+    "image", "dall", "flux", "banana", "embedding", "embed", "tts", "whisper",
+    "rerank", "moderation", "transcribe", "asr", "ocr",
+)
+
+
+def looks_like_video_model(name):
+    """按名字猜是否视频模型；中转的 /models 不带能力字段，只能启发式。"""
+    lowered = str(name).lower()
+    if any(bad in lowered for bad in NON_VIDEO_MODEL_HINTS):
+        return False
+    return any(hint in lowered for hint in VIDEO_MODEL_HINTS)
+
+
+def fetch_models(base_url, api_key, timeout=20):
+    """GET /models，返回 (names, error)；失败不抛异常。"""
+    request = urllib.request.Request(
+        join_url(base_url, "/models"),
+        headers=build_headers(api_key),
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        return None, f"HTTP {error.code}"
+    except urllib.error.URLError as error:
+        return None, str(error.reason)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, "返回不是 JSON"
+    items = payload.get("data") or payload.get("models") or []
+    if isinstance(items, dict):
+        items = list(items.values())
+    names, seen = [], set()
+    for item in items:
+        name = item.get("id") or item.get("name") if isinstance(item, dict) else str(item)
+        if isinstance(name, str) and name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names, None
+
+
+def print_video_models(names, error=None):
+    if names is None:
+        print(f"拉取模型列表失败：{error}")
+        print("可以直接用 --model NAME 指定视频模型，或检查 IMAGE_API_BASE / GENIMG_API_KEY。")
+        return
+    videos = [n for n in names if looks_like_video_model(n)]
+    print(f"账号可用模型 {len(names)} 个，其中疑似视频模型 {len(videos)} 个：")
+    for index, name in enumerate(videos, 1):
+        print(f"  {index}) {name}")
+    if not videos:
+        print(
+            "  （没有视频模型）该账号分组未开通视频能力，需要中转后台授权后再用；"
+            "图片能力不受影响。"
+        )
+    others = [n for n in names if n not in videos]
+    if others:
+        shown = ", ".join(others[:10]) + ("…" if len(others) > 10 else "")
+        print(f"其它 {len(others)} 个（按名字判断不是视频模型）：{shown}")
+
+
 def join_url(base, endpoint):
     base = base.rstrip("/")
     endpoint = endpoint or DEFAULT_ENDPOINT
@@ -490,6 +556,8 @@ def create_parser():
     parser.add_argument("--task-id", help="续查已有任务，不创建新任务")
     parser.add_argument("--resume-last", dest="resume_last", action="store_true",
                         help="自动续查本地任务记录里最近一个未完成任务")
+    parser.add_argument("--list-models", dest="list_models", action="store_true",
+                        help="查询账号可用的视频模型（免费，不创建任务）")
     parser.add_argument("--list-tasks", dest="list_tasks", action="store_true",
                         help="列出本地记录的视频任务（不联网）")
     parser.add_argument("--log-file", dest="log_file",
@@ -525,6 +593,19 @@ def main(argv=None):
         parser.error("超时参数必须大于 0")
     if args.task_id and args.dry_run:
         parser.error("--task-id 不能与 --dry-run 一起使用")
+
+    if args.list_models:
+        base_env = os.environ.get("IMAGE_API_BASE")
+        if not base_env:
+            print(
+                "未设置 IMAGE_API_BASE，查不到模型列表。先执行：\n"
+                "  export IMAGE_API_BASE='https://你的中转站/v1'\n"
+                "  export GENIMG_API_KEY='sk-xxx'"
+            )
+            return 1
+        names, error = fetch_models(base_env, os.environ.get("GENIMG_API_KEY"))
+        print_video_models(names, error)
+        return 0 if names is not None else 1
 
     log_path = task_log_path(args)
 
@@ -614,7 +695,7 @@ def main(argv=None):
             },
         )
         print(f"[video] ✓ 任务已创建：{task_id}")
-        print(f"[video] 已记录到 {log_path}")
+        print(f"[video] 已记录到 {log_path.resolve()}")
         if args.no_wait:
             print(f"续查：python3 genvideo.py --task-id {task_id}")
             return 0

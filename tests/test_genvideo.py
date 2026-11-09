@@ -171,5 +171,18 @@ class MediaProbeTests(unittest.TestCase):
         self.assertEqual("1280x720，5.0s，h264", text)
 
 
+class VideoModelListingTests(unittest.TestCase):
+    def test_video_models_are_recognised(self):
+        for name in ("video-ds-2.0-fast", "video-ds-2.0", "seedance-1.0-pro",
+                     "kling-v2", "veo-3", "sora-1", "hailuo-02"):
+            self.assertTrue(genvideo.looks_like_video_model(name), name)
+
+    def test_image_and_text_models_are_not_video(self):
+        for name in ("gpt-image-2", "gpt-image-2.5-flare",
+                     "grok-imagine-image-2.0", "deepseek-v4-flash",
+                     "text-embedding-3-small", "tts-1"):
+            self.assertFalse(genvideo.looks_like_video_model(name), name)
+
+
 if __name__ == "__main__":
     unittest.main()

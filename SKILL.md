@@ -298,6 +298,15 @@ python3 genimg.py "赛博朋克街景" --provider banana,image2 --jobs 2
 
 ## 视频工作流
 
+**先确认账号有没有视频能力**（免费，不创建任务）：
+
+```bash
+python3 genvideo.py --list-models
+```
+
+返回「没有视频模型」= 该中转分组未开通视频，图片能力不受影响；不要反复重试，
+直接告诉用户需要中转后台授权。返回若干 `video-*` / `seedance-*` 模型 = 可以开工。
+
 ```bash
 # 默认快速版，创建后轮询并下载
 python3 genvideo.py "雨夜城市上空飞行，镜头缓慢推进" \
