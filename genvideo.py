@@ -17,6 +17,18 @@ from pathlib import Path
 
 
 DEFAULT_MODEL = "video-ds-2.0-fast"
+DEFAULT_OPENAI_VIDEO_MODEL = "sora-2"
+PROTOCOL_SUB2 = "sub2"      # Sub2API / 即梦风格扩展字段（aspect_ratio、images[]）
+PROTOCOL_OPENAI = "openai"  # 严格 OpenAI Videos API（size、input_reference、4/8/12 秒）
+# OpenAI 只认这几个尺寸，比例必须换算成具体宽高。
+OPENAI_VIDEO_SIZES = {
+    "16:9": "1280x720",
+    "9:16": "720x1280",
+    "3:2": "1792x1024",
+    "2:3": "1024x1792",
+}
+OPENAI_VIDEO_SIZE_SET = {"720x1280", "1280x720", "1024x1792", "1792x1024"}
+OPENAI_VIDEO_SECONDS = ("4", "8", "12")
 DEFAULT_ENDPOINT = "/videos"
 TERMINAL_FAILURE_STATES = {"failed", "cancelled", "canceled", "expired"}
 TERMINAL_STATES = TERMINAL_FAILURE_STATES | {"completed"}
@@ -197,6 +209,54 @@ def validate_reference_urls(kind, values, auto_upload=None):
                 "视频参考素材必须使用公网 URL。"
             )
     return processed
+
+
+def build_openai_video_body(
+    model, prompt, seconds="4", aspect_ratio="16:9", size=None,
+    images=None, videos=None, audios=None, extra_body=None, auto_upload=None,
+):
+    """严格 OpenAI Videos API 请求体：size + input_reference，秒数只认 4/8/12。"""
+    if not prompt:
+        raise ValueError("创建视频任务时必须提供提示词。")
+    if videos or audios:
+        raise ValueError(
+            "OpenAI 视频协议只接受一张 input_reference 参考图，不支持视频/音频参考；"
+            "需要这些素材请用 --protocol sub2。"
+        )
+    second_text = str(seconds)
+    if second_text not in OPENAI_VIDEO_SECONDS:
+        raise ValueError(
+            f"OpenAI 视频协议只支持 { '/'.join(OPENAI_VIDEO_SECONDS) } 秒，"
+            f"当前 {seconds} 秒；要么改 --seconds，要么用 --protocol sub2。"
+        )
+    if size:
+        if size not in OPENAI_VIDEO_SIZE_SET:
+            raise ValueError(
+                f"OpenAI 视频协议 size 只支持 {', '.join(sorted(OPENAI_VIDEO_SIZE_SET))}，"
+                f"当前 {size}。"
+            )
+        resolved_size = size
+    else:
+        resolved_size = OPENAI_VIDEO_SIZES.get(str(aspect_ratio))
+        if not resolved_size:
+            raise ValueError(
+                f"OpenAI 视频协议没有 {aspect_ratio} 这个比例；"
+                f"可用比例 {', '.join(OPENAI_VIDEO_SIZES)}，或直接用 --size 指定宽高。"
+            )
+    image_urls = validate_reference_urls("image", images, auto_upload)
+    if len(image_urls) > 1:
+        raise ValueError(
+            f"OpenAI 视频协议只接受一张参考图（input_reference），当前给了 {len(image_urls)} 张。"
+        )
+    body = {
+        "model": model or DEFAULT_OPENAI_VIDEO_MODEL,
+        "prompt": prompt,
+        "seconds": second_text,
+        "size": resolved_size,
+    }
+    if image_urls:
+        body["input_reference"] = image_urls[0]
+    return deep_merge(extra_body or {}, body)
 
 
 def build_video_body(
@@ -572,9 +632,15 @@ def create_parser():
         description="异步视频生成 CLI：创建任务、轮询状态并下载 MP4。",
     )
     parser.add_argument("prompt", nargs="?", help="视频提示词；使用 --task-id 时可省略")
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help=f"视频模型，默认 {DEFAULT_MODEL}")
-    parser.add_argument("--seconds", default="5", help="视频时长，例如 5、10、15")
+    parser.add_argument("--model", default=None,
+                        help=f"视频模型；默认 sub2 协议用 {DEFAULT_MODEL}，"
+                             f"openai 协议用 {DEFAULT_OPENAI_VIDEO_MODEL}")
+    parser.add_argument("--protocol", choices=[PROTOCOL_SUB2, PROTOCOL_OPENAI],
+                        default=PROTOCOL_SUB2,
+                        help="sub2（默认，Sub2/即梦扩展字段）或 openai（严格 OpenAI Videos API）")
+    parser.add_argument("--size", help="输出宽高，openai 协议用，如 1280x720")
+    parser.add_argument("--seconds", default=None,
+                        help="视频时长；sub2 协议如 5/10/15，openai 协议只支持 4/8/12")
     parser.add_argument("--aspect-ratio", default="16:9",
                         help="画面比例，例如 16:9、9:16、1:1")
     parser.add_argument("--image", action="append", default=[],
@@ -656,6 +722,8 @@ def main(argv=None):
             args.out = last["out"]
         print(f"[video] 从本地记录续查：{args.task_id}")
 
+    if args.seconds is None:
+        args.seconds = "4" if getattr(args, "protocol", PROTOCOL_SUB2) == PROTOCOL_OPENAI else "5"
     if not args.task_id and not args.prompt:
         parser.error("创建任务时缺少视频提示词")
 
@@ -680,21 +748,41 @@ def main(argv=None):
     if not task_id:
         try:
             param_body = parse_param_assignments(args.param)
-            body = build_video_body(
-                args.model,
-                args.prompt,
-                seconds=args.seconds,
-                aspect_ratio=args.aspect_ratio,
-                images=args.image,
-                videos=args.video,
-                audios=args.audio,
-                auto_upload=args.auto_upload,
+            model_name = args.model or (
+                DEFAULT_OPENAI_VIDEO_MODEL if args.protocol == PROTOCOL_OPENAI
+                else DEFAULT_MODEL
             )
+            if args.protocol == PROTOCOL_OPENAI:
+                body = build_openai_video_body(
+                    model_name,
+                    args.prompt,
+                    seconds=args.seconds,
+                    aspect_ratio=args.aspect_ratio,
+                    size=args.size,
+                    images=args.image,
+                    videos=args.video,
+                    audios=args.audio,
+                    auto_upload=args.auto_upload,
+                )
+            else:
+                body = build_video_body(
+                    model_name,
+                    args.prompt,
+                    seconds=args.seconds,
+                    aspect_ratio=args.aspect_ratio,
+                    images=args.image,
+                    videos=args.video,
+                    audios=args.audio,
+                    auto_upload=args.auto_upload,
+                )
             body = deep_merge(body, param_body)
         except ValueError as error:
             parser.error(str(error))
         create_url = join_url(base_url, args.endpoint)
-        print(f"[video] POST {create_url} (model={args.model}, seconds={args.seconds})")
+        print(
+            f"[video] POST {create_url} "
+            f"(protocol={args.protocol}, model={model_name}, seconds={args.seconds})"
+        )
         if args.debug or args.dry_run:
             print(json.dumps(sanitize(body), ensure_ascii=False, indent=2))
         if args.dry_run:

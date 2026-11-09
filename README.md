@@ -305,6 +305,27 @@ Sub2。不会把 URL 或 Base64 当成普通文本字段发送。单张输入最
 
 ## 视频任务
 
+### 两种协议
+
+`genvideo.py` 支持两套请求字段，端点骨架相同（`POST /v1/videos` → 轮询 → `/content` 下载）：
+
+| | `--protocol sub2`（默认） | `--protocol openai` |
+|---|---|---|
+| 默认模型 | `video-ds-2.0-fast` | `sora-2` |
+| 比例 | `aspect_ratio` | `size`（720x1280 / 1280x720 / 1024x1792 / 1792x1024） |
+| 时长 | 任意 | 只支持 4 / 8 / 12 秒 |
+| 参考素材 | 图片/视频/音频数组 | 单个 `input_reference` |
+
+```bash
+# OpenAI 协议（Sora 或严格兼容它的中转）
+python3 genvideo.py "雨夜城市上空飞行" --protocol openai --seconds 8 --aspect-ratio 16:9
+python3 genvideo.py "雨夜城市" --protocol openai --size 720x1280 --seconds 4
+```
+
+字段对照来自 OpenAI 官方 SDK（`video_create_params.py`：`prompt` / `input_reference` /
+`model` / `seconds` / `size`）。`openai` 协议下多图、视频/音频参考、非 4/8/12 秒会在本地被
+拒绝并说明原因，不会白发请求。
+
 先确认账号有没有视频能力（免费，不创建任务）：
 
 ```bash

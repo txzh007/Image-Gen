@@ -211,5 +211,54 @@ class CreateErrorHintTests(unittest.TestCase):
         self.assertIsNone(genvideo.explain_create_error(200, {"task_id": "x"}, b""))
 
 
+class OpenAIVideoProtocolTests(unittest.TestCase):
+    """严格 OpenAI Videos API：size + input_reference + 4/8/12 秒。"""
+
+    def test_ratio_maps_to_openai_size(self):
+        body = genvideo.build_openai_video_body(None, "rain city", aspect_ratio="9:16")
+        self.assertEqual("sora-2", body["model"])
+        self.assertEqual("720x1280", body["size"])
+        self.assertEqual("4", body["seconds"])
+        self.assertNotIn("aspect_ratio", body)
+
+    def test_explicit_size_wins(self):
+        body = genvideo.build_openai_video_body("sora-2-pro", "x", size="1792x1024")
+        self.assertEqual("1792x1024", body["size"])
+        self.assertEqual("sora-2-pro", body["model"])
+
+    def test_unknown_size_rejected(self):
+        with self.assertRaisesRegex(ValueError, "size 只支持"):
+            genvideo.build_openai_video_body(None, "x", size="1920x1080")
+
+    def test_unsupported_ratio_rejected(self):
+        with self.assertRaisesRegex(ValueError, "没有 1:1"):
+            genvideo.build_openai_video_body(None, "x", aspect_ratio="1:1")
+
+    def test_only_4_8_12_seconds_allowed(self):
+        with self.assertRaisesRegex(ValueError, "4/8/12"):
+            genvideo.build_openai_video_body(None, "x", seconds="5")
+        body = genvideo.build_openai_video_body(None, "x", seconds="12")
+        self.assertEqual("12", body["seconds"])
+
+    def test_single_image_becomes_input_reference(self):
+        body = genvideo.build_openai_video_body(
+            None, "x", images=["https://example.com/a.png"]
+        )
+        self.assertEqual("https://example.com/a.png", body["input_reference"])
+
+    def test_multiple_images_rejected(self):
+        with self.assertRaisesRegex(ValueError, "只接受一张"):
+            genvideo.build_openai_video_body(
+                None, "x",
+                images=["https://example.com/a.png", "https://example.com/b.png"],
+            )
+
+    def test_video_and_audio_references_rejected(self):
+        with self.assertRaisesRegex(ValueError, "不支持视频/音频"):
+            genvideo.build_openai_video_body(
+                None, "x", videos=["https://example.com/a.mp4"]
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

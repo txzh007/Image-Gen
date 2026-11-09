@@ -335,6 +335,34 @@ python3 genvideo.py --list-tasks
 
 默认 `video-ds-2.0-fast`；用户明确要标准版才用 `video-ds-2.0`。
 
+### 两种协议：`--protocol`
+
+端点骨架两种协议相同（`POST /v1/videos` → `GET /v1/videos/{id}` 轮询 → `GET
+/v1/videos/{id}/content` 下载 MP4），差别只在请求字段：
+
+| | `--protocol sub2`（默认） | `--protocol openai` |
+|---|---|---|
+| 默认模型 | `video-ds-2.0-fast` | `sora-2` |
+| 画面比例 | `aspect_ratio: "16:9"` | `size: "1280x720"`（只认 4 个尺寸） |
+| 时长 | 任意，如 `5`/`10` | **只支持 4/8/12 秒** |
+| 参考素材 | `images`/`videos`/`audios` 数组 | 单个 `input_reference` |
+| 适用 | Sub2API、即梦/Seedance 等扩展中转 | OpenAI 官方 Sora 或严格兼容它的中转 |
+
+```bash
+# OpenAI 协议：比例自动换算成 size
+python3 genvideo.py "雨夜城市上空飞行" --protocol openai --seconds 8 --aspect-ratio 16:9
+
+# 直接给官方尺寸
+python3 genvideo.py "雨夜城市" --protocol openai --size 720x1280 --seconds 4
+
+# 图生视频（单张参考图）
+python3 genvideo.py "让这张图动起来" --protocol openai \
+  --image https://example.com/in.png --seconds 4
+```
+
+`openai` 协议下多张参考图、视频/音频参考、非 4/8/12 秒都会被本地直接拒绝并说明原因 ——
+这些是协议限制，不是脚本限制。中转只支持其中一种协议时，换 `--protocol` 即可，不用改代码。
+
 **任务记录**：创建成功后立刻把 `task_id`、模型、时长、提示词写进输出目录的
 `.genvideo-tasks.jsonl`（`--log-file` 可改），完成/失败也会追加一条。中断、超时、
 上下文丢失后一律 `--task-id` 或 `--resume-last` 续查，不要重新创建。

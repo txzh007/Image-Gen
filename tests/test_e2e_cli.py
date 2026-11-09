@@ -285,6 +285,23 @@ class GenvideoEndToEndTests(unittest.TestCase):
             self.assertEqual("completed", entries[-1]["status"])
             self.assertEqual("task_mock_1", entries[-1]["task_id"])
 
+    def test_openai_protocol_sends_size_not_aspect_ratio(self):
+        with MockRelay() as relay, tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli(
+                "genvideo.py",
+                ["雨夜城市", "--protocol", "openai", "--poll-interval", "1",
+                 "--out", "v.mp4"],
+                tmp,
+                relay,
+            )
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            sent = relay.httpd.last_video_request
+            self.assertEqual("sora-2", sent["model"])
+            self.assertEqual("1280x720", sent["size"])
+            self.assertEqual("4", sent["seconds"])
+            self.assertNotIn("aspect_ratio", sent)
+            self.assertTrue((Path(tmp) / "v.mp4").is_file())
+
     def test_list_models_shows_video_models_without_creating_task(self):
         with MockRelay(models=["video-ds-2.0-fast", "gpt-image-2"]) as relay, \
                 tempfile.TemporaryDirectory() as tmp:
