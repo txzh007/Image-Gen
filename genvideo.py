@@ -378,10 +378,15 @@ def explain_create_error(status, parsed, raw):
         return "限流：稍等再试，不要连续重试。"
     if status in (401, 403):
         return "鉴权失败：检查 GENIMG_API_KEY 是否有效、是否有该模型权限。"
-    if status == 400 and isinstance(parsed, dict):
-        message = str(parsed.get("error") or parsed.get("message") or "")
-        if "model_not_found" in message or "not available" in message:
+    if status in (400, 422):
+        if "model_not_found" in lowered or "not available" in lowered:
             return "该模型未对当前分组开放：先跑 `--list-models` 看账号有哪些视频模型。"
+        if "upstream returned status" in lowered or "invalid" in lowered:
+            return (
+                "上游拒绝了请求参数（400/422）：多数是 resolution 档位超出模型能力。"
+                "实测 grok-imagine-video 只支持 480p/720p，1080p 需要 grok-imagine-video-1.5；"
+                "并且 resolution 只认 480p/720p/1080p 这类档位名，写 1920x1080 会被拒。"
+            )
     return None
 
 

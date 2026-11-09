@@ -314,8 +314,20 @@ Sub2。不会把 URL 或 Base64 当成普通文本字段发送。单张输入最
 | 时长 | `--seconds 5` → `"seconds":"5"` | `--duration 5` → `"duration":5`（数字） |
 | 尺寸 | `--aspect-ratio 16:9` → `"aspect_ratio"` | `--resolution 720p` → `"resolution"` |
 
-`grok-imagine-video` 实测：`aspect_ratio:"16:9"` 得到 848×480；`resolution:"720p"` 得到
-**1280×720**，上游计费 ticks 也从 2.5e9 升到 3.5e9。要确定分辨率就用 `--resolution`。
+分辨率档位实测（同一提示词、5 秒）：
+
+| 模型 | `--resolution` | 实际输出 | 体积 | 上游 ticks |
+|---|---|---|---|---|
+| `grok-imagine-video` | 480p | 848×480 | 2.2 MB | 2.5e9 |
+| `grok-imagine-video` | 720p | 1280×720 | 4.1 MB | 3.5e9 |
+| `grok-imagine-video` | 1080p | ❌ 400 | — | — |
+| `grok-imagine-video-1.5` | 480p | 848×480 | 3.4 MB | 4.0e9 |
+| `grok-imagine-video-1.5` | 720p | 1280×720 | 7.8 MB | 7.0e9 |
+| `grok-imagine-video-1.5` | 1080p | **1920×1088** | 16 MB | 12.5e9 |
+
+- 1080p 只有 `-1.5` 支持
+- `--resolution` 只认 `480p`/`720p`/`1080p`，写 `1920x1080` 会 422
+- `-1.5` 同档位贵约 2 倍、码率高约 2 倍
 
 ```bash
 python3 genvideo.py "雨夜城市" --model grok-imagine-video --duration 5 --resolution 720p

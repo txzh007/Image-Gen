@@ -344,6 +344,24 @@ python3 genvideo.py --list-tasks
 | 时长 | `--seconds 5` → `"seconds":"5"`（字符串） | `--duration 5` → `"duration":5`（**数字**） |
 | 尺寸 | `--aspect-ratio 16:9` → `"aspect_ratio":"16:9"` | `--resolution 720p` → `"resolution":"720p"` |
 
+实测的分辨率档位与计费（同一提示词、5 秒）：
+
+| 模型 | `--resolution` | 实际输出 | 体积 | 上游 ticks |
+|---|---|---|---|---|
+| `grok-imagine-video` | 480p | 848×480 | 2.2 MB | 2.5e9 |
+| `grok-imagine-video` | 720p | 1280×720 | 4.1 MB | 3.5e9 |
+| `grok-imagine-video` | 1080p | ❌ 400 上游拒绝 | — | — |
+| `grok-imagine-video-1.5` | 480p | 848×480 | 3.4 MB | 4.0e9 |
+| `grok-imagine-video-1.5` | 720p | 1280×720 | 7.8 MB | 7.0e9 |
+| `grok-imagine-video-1.5` | 1080p | **1920×1088** | 16 MB | 12.5e9 |
+
+三条硬结论：
+
+1. **1080p 只有 `-1.5` 支持**；普通版给 1080p 会被上游 400 拒掉。
+2. **`--resolution` 只认 `480p`/`720p`/`1080p` 这类档位名**，写 `1920x1080` 会 422。
+3. **`-1.5` 同档位贵约 2 倍，码率也高约 2 倍**（720p：7.8 MB vs 4.1 MB），画质更细；
+   480p 时两者分辨率相同，只是 1.5 编码更重。
+
 在 `grok-imagine-video` 上实测的差别是**实质性的**：
 
 | 请求 | 实际输出 | 上游计费 ticks |

@@ -354,5 +354,22 @@ class DurationResolutionTests(unittest.TestCase):
         self.assertEqual("16:9", body["aspect_ratio"])
 
 
+class ResolutionLimitHintTests(unittest.TestCase):
+    def test_upstream_400_hints_resolution_limits(self):
+        hint = genvideo.explain_create_error(
+            400,
+            {"error": {"message": "xAI upstream returned status 400"}},
+            b"",
+        )
+        self.assertIn("resolution", hint)
+        self.assertIn("480p/720p", hint)
+
+    def test_upstream_422_also_hints(self):
+        hint = genvideo.explain_create_error(
+            422, {"error": {"message": "xAI upstream returned status 422"}}, b""
+        )
+        self.assertIn("resolution", hint)
+
+
 if __name__ == "__main__":
     unittest.main()
