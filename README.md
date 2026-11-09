@@ -122,10 +122,10 @@ python3 genimg.py "一只戴墨镜的柴犬" --size 1024x1024 --out ./first.png
 
 ```bash
 # 默认 Gemini Flash
-python3 genimg.py "一只戴墨镜的柴犬" --provider banana
+python3 genimg.py "一只戴墨镜的柴犬"
 
 # 明确使用 Gemini Pro
-python3 genimg.py "复杂商业海报" --provider banana \
+python3 genimg.py "复杂商业海报" \
   --model gpt-image-gemini-pro
 
 # GPT Image
@@ -133,10 +133,10 @@ python3 genimg.py "透明底产品图" --provider image2 \
   --size 1536x1024 --quality high --background transparent
 
 # 两种模型同时生成，方便比较（并行）
-python3 genimg.py "赛博朋克城市夜景" --provider banana,image2 --jobs 2
+python3 genimg.py "赛博朋克城市夜景" --provider image2,banana --jobs 2
 
 # 多提示词批量：一行一条，# 开头是注释
-python3 genimg.py --prompt-file prompts.txt --provider banana
+python3 genimg.py --prompt-file prompts.txt
 ```
 
 每次真实运行都会在输出目录写 `run-<时间戳>.json`：提示词、模型、最终参数、每张图的
@@ -149,7 +149,7 @@ python3 genimg.py --prompt-file prompts.txt --provider banana
 python3 genimg.py --list-models
 
 # 不指定模型：自动打 /v1/models 择优
-python3 genimg.py "提示词" --provider banana
+python3 genimg.py "提示词"          # 默认 image2 / gpt-image-2
 
 # 显式指定，任意模型名都放行（可用性由中转判断）
 python3 genimg.py "提示词" --model gpt-image-2.5-flare
@@ -166,12 +166,16 @@ python3 genimg.py "提示词" --no-discover
 第一个像生图的模型。Pro 级不参与自动选择。列表缓存在 `output/.genimg-models.json`，
 TTL 10 分钟；拉取失败会回退配置默认，不阻塞出图。
 
-provider 只是「默认参数包」：
+provider 只是「默认参数包」，真正发给中转的是模型名。**默认是 `image2`（真实模型
+`gpt-image-2`）**：
 
 | provider | 默认模型 | 默认参数 | 生成/编辑接口 |
 |---|---|---|---|
-| `banana` | `gpt-image-gemini-flash` | `n=1` | `/images/generations`、`/images/edits` |
-| `image2` | `gpt-image-2` | `size/quality/output_format/n` | 同上 |
+| `image2`（默认） | `gpt-image-2` | `size/quality/output_format/n` | `/images/generations`、`/images/edits` |
+| `banana`（兼容） | `gpt-image-gemini-flash` | `n=1` | 同上 |
+
+`banana` 是 `gpt-banana` 系列的历史兼容别名，**不是真实模型** —— 只有账号里确实存在
+`gpt-image-gemini-*` 时才需要用它；新场景直接省略 `--provider` 即可。
 
 已知上游名（`gemini-3-pro-image` 等）会自动翻成中转别名。不要改用 `/chat/completions`。
 
@@ -199,19 +203,19 @@ provider 只是「默认参数包」：
 
 ```bash
 # 头像 / 方图
-python3 genimg.py "提示词" --provider banana --size 1024x1024
+python3 genimg.py "提示词" --size 1024x1024
 
 # 横版封面
-python3 genimg.py "提示词" --provider banana --size 1536x1024
+python3 genimg.py "提示词" --size 1536x1024
 
 # 竖版海报
-python3 genimg.py "提示词" --provider banana --size 1024x1536
+python3 genimg.py "提示词" --size 1024x1536
 
 # 三个方案挑选
-python3 genimg.py "提示词" --provider banana --n 3 --size 1024x1024
+python3 genimg.py "提示词" --n 3 --size 1024x1024
 
 # 两个模型并行对比
-python3 genimg.py "提示词" --provider banana,image2 --jobs 2 --size 1024x1024
+python3 genimg.py "提示词" --provider image2,banana --jobs 2 --size 1024x1024
 
 # 改图并锁尺寸
 python3 genimg.py "只把背景换成夜景，主体不变" --image in.png --size 1024x1024 --out out.png
@@ -265,7 +269,7 @@ magick in.png -fuzz 8% -transparent white out.png
 ### 不同模型的实测差异
 
 - 有的模型忽略 `--size`（请求 1024×1024 返回 1254×1254），以清单实际宽高为准。
-- 参数容忍度不同：新模型若报 `Invalid request`，换 `--provider banana` 的最小参数重试。
+- 参数容忍度不同：新模型若报 `Invalid request`，去掉多余参数或用 `--provider banana` 的最小参数重试。
 - 部分模型的产物链接由上游直出（如 `imgen.x.ai`），中转未代理，本机下载会 403。
   这类模型取不到图；程序只在**同源域名**下才带 Authorization，绝不把 Key 发给第三方。
 
@@ -274,10 +278,10 @@ magick in.png -fuzz 8% -transparent white out.png
 ```bash
 # 本地图片
 python3 genimg.py "只把背景改成夜晚城市，保持主体和构图不变" \
-  --provider banana --image ./input.png --out ./output/edited
+  --image ./input.png --out ./output/edited
 
 # 公网图片 URL
-python3 genimg.py "改成冬天下雪" --provider banana \
+python3 genimg.py "改成冬天下雪" \
   --image "https://example.com/input.jpg"
 
 # 多图参考
@@ -348,7 +352,7 @@ python3 genvideo.py "让参考图片动起来" \
 
 ```text
 genimg.py:
-  --provider/-p       banana、image2 或逗号分隔组合
+  --provider/-p       image2（默认）、banana（兼容）或逗号分隔组合
   --prompt-file       批量提示词文件，一行一条
   --image/-i          编辑输入，可重复
   --mask              遮罩，尺寸须与第一张输入图一致
@@ -394,9 +398,9 @@ python3 genvideo.py --help
 ## 常见错误
 
 - `No available compatible accounts`：中转当前没有可调度渠道，稍后重试或检查后台。
-- `model_not_found`：该中转没有开通这个模型，换 `--provider banana` 或确认渠道。
+- `model_not_found`：该中转没有开通这个模型，先 `--list-models` 看账号实际有什么。
 - 遮罩尺寸报错：遮罩必须与第一张输入图同宽高，且带 alpha 通道。
-- 新模型 `Invalid request`：参数不兼容，换 `--provider banana` 的最小参数。
+- 新模型 `Invalid request`：参数不兼容，去掉多余的 size/quality，或用 `--provider banana`（最小参数）。
 - 产物下载 403（host 是上游域名）：中转没代理该产物，换产物经中转代理的模型。
 - 保存失败提示「不是图片」：返回的是错误页或防盗链内容，脚本不会写成假文件。
 - HTTP 429/503：图片脚本按 2、4、8 秒重试，保持原模型，不会自动切换收费模型。

@@ -63,7 +63,7 @@ Windows Terminal。三个脚本已统一 stdout/stderr 为 UTF-8 并对不可编
 
 ```bash
 python3 genimg.py --list-models            # 真验证：能看到模型列表 = 地址和 Key 都对
-python3 genimg.py "x" --provider banana --dry-run    # 只看请求体，不联网
+python3 genimg.py "x" --dry-run                       # 只看请求体，不联网
 python3 genvideo.py "配置检查" --dry-run              # 同上
 ```
 
@@ -71,10 +71,10 @@ python3 genvideo.py "配置检查" --dry-run              # 同上
 
 | 用户说 | 动作 |
 |---|---|
-| 生图 / 画一张 / 出图 | `genimg.py "提示词" --provider banana` |
+| 生图 / 画一张 / 出图 | `genimg.py "提示词"`（默认 image2 / `gpt-image-2`） |
 | 要更好效果 / 复杂海报 / 细节多 | 先 `--list-models`，再 `--model` 指定更强模型（如 `gpt-image-2.5-flare`）；Pro 必须显式加 |
 | 点名 GPT Image / image2 / `gpt-image-2` | `--provider image2` |
-| 想知道哪个模型更好 | `--provider banana,image2 --jobs 2` |
+| 想知道哪个模型更好 | `--provider image2,banana --jobs 2`（或直接用 `--model` 指定任意模型） |
 | 改这张图 / 换背景 / 修图 | `--image 路径` + 只描述要改的那一处 |
 | 只改局部 | `--image` + `--mask`（遮罩须与第一张图同尺寸、带 alpha） |
 | 给两张参考图融合 | `--image a.png --image b.png`，用「第一张/第二张」指代 |
@@ -90,7 +90,9 @@ python3 genvideo.py "配置检查" --dry-run              # 同上
 
 ### 模型：自动发现 + 自动择优
 
-provider 只是本地的「默认参数包」，真正发给中转的是模型名。启动时会先查一次
+provider 只是本地的「默认参数包」，真正发给中转的是模型名。**默认 provider 是 `image2`
+（真实模型 `gpt-image-2`）；`banana` 是 `gpt-banana` 历史兼容别名，不是真实模型**，仅当账号
+里确实有 `gpt-image-gemini-*` 时才用。启动时会先查一次
 `/v1/models`（结果缓存在 `output/.genimg-models.json`，TTL 10 分钟），据此决定用哪个
 模型：
 
@@ -119,7 +121,7 @@ python3 genimg.py "提示词" --model gpt-image-2.5-flare   # 显式指定任意
 - **有的模型忽略 `--size`**：请求 1024×1024 可能返回 1254×1254。以清单里的实际宽高为准，
   汇报时说实际值，不要复述请求值。
 - **参数容忍度不同**：某模型在 `image2`（会带 `quality`/`output_format`）下报
-  `Invalid request`，换 `--provider banana`（只带 model/prompt/n）就能发出去。
+  `Invalid request`，换成不给默认参数的 `--provider banana`（只带 model/prompt/n）就能发出去。
   新模型先试 banana 组的最小参数。
 - **产物可能由上游直出**：部分模型的图片链接是上游域名（如 `imgen.x.ai`）且需要上游
   鉴权，中转没代理该产物，下载必然 403。这类模型在本机取不到图，换 `gpt-image-2` 等
@@ -166,22 +168,22 @@ python3 genimg.py "提示词" --model gpt-image-2.5-flare   # 显式指定任意
 
 ```bash
 # 头像 / 方图
-python3 genimg.py "提示词" --provider banana --size 1024x1024
+python3 genimg.py "提示词" --size 1024x1024
 
 # 横版封面
-python3 genimg.py "提示词" --provider banana --size 1536x1024
+python3 genimg.py "提示词" --size 1536x1024
 
 # 竖版海报（手机屏）
-python3 genimg.py "提示词" --provider banana --size 1024x1536
+python3 genimg.py "提示词" --size 1024x1536
 
 # 要几个方案挑选
-python3 genimg.py "提示词" --provider banana --n 3 --size 1024x1024
+python3 genimg.py "提示词" --n 3 --size 1024x1024
 
 # 两个模型并行各出一张对比
-python3 genimg.py "提示词" --provider banana,image2 --jobs 2 --size 1024x1024
+python3 genimg.py "提示词" --provider image2,banana --jobs 2 --size 1024x1024
 
 # 商品透明底（必须校验）
-python3 genimg.py "提示词" --provider banana --size 1024x1024 --background transparent
+python3 genimg.py "提示词" --size 1024x1024 --background transparent
 
 # 改图且锁住尺寸，别让模型自己改构图
 python3 genimg.py "只把背景换成夜景，主体不变" --image in.png \
@@ -258,10 +260,10 @@ magick in.png -fuzz 8% -transparent white out.png
 
 ```bash
 # 多提示词批量：一行一条，# 开头是注释
-python3 genimg.py --prompt-file prompts.txt --provider banana
+python3 genimg.py --prompt-file prompts.txt
 
 # 两个模型并行出图，便于挑选
-python3 genimg.py "赛博朋克街景" --provider banana,image2 --jobs 2
+python3 genimg.py "赛博朋克街景" --provider image2,banana --jobs 2
 ```
 
 ### 输出与运行清单
@@ -346,12 +348,12 @@ python3 genvideo.py --list-tasks
 | 现象 | 处理 |
 |---|---|
 | HTTP 429 / 503 | 脚本已按 2/4/8 秒退避重试 3 次且不换模型；仍失败就等下再试 |
-| `model_not_found` | 该中转没开通此模型；换 `--provider banana` 或让用户确认渠道 |
+| `model_not_found` | 该中转没开通此模型；先 `--list-models` 看账号有什么，或让用户确认渠道 |
 | `No available compatible accounts` | 分组暂时没有可调度渠道，稍后重试或换 provider |
 | `images endpoint requires an image model` | 误用了真实 Gemini 上游模型名 |
 | 余额 / 额度不足 | 如实回报，不要换模型反复试 |
 | 内容审核拒绝（`upstream_policy_refusal_text` 等，可能是外语原文） | 换描述或去掉敏感词后重试一次；同一提示词不要连刷；要稳就换 `--model gpt-image-2` |
-| 新模型 `Invalid request` | 参数不兼容，改用 `--provider banana` 的最小参数再试 |
+| 新模型 `Invalid request` | 参数不兼容，改用 `--provider banana`（最小参数）再试，或删掉多余的 size/quality |
 | 产物下载 403（host 是上游域名） | 中转未代理该产物，客户端取不到；换产物经中转代理的模型 |
 | 实际尺寸≠请求尺寸 | 某些模型忽略 `--size`，以清单实际宽高为准 |
 | 413 | 减少 `--image` 张数或先压缩参考图 |

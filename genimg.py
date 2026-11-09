@@ -54,7 +54,14 @@ REQUEST_OPTION_NAMES = (
 )
 
 GEMINI_IMAGE_SIZES = {"0.5K", "512", "1K", "2K", "4K"}
-DEFAULT_SUB2_IMAGE_MODEL = "gpt-image-gemini-flash"
+DEFAULT_PROVIDER = "image2"
+DEFAULT_SUB2_IMAGE_MODEL = "gpt-image-2"
+# provider → 默认模型。banana 系列是历史兼容别名（gpt-banana），不是真实模型，
+# 保留可用但不再作为默认。
+DEFAULT_MODEL_BY_PROVIDER = {
+    "image2": "gpt-image-2",
+    "banana": "gpt-image-gemini-flash",
+}
 # 已知图片模型：只用于「猜哪些能生图」和打印提示，不再拦截请求。
 KNOWN_IMAGE_MODELS = {
     "gpt-image-gemini-flash",
@@ -198,8 +205,8 @@ def resolve_provider(name, config, args):
     if not api_key and not getattr(args, "dry_run", False):
         raise ValueError("缺少 GENIMG_API_KEY。")
 
-    configured_model = cfg.get("model") or (
-        DEFAULT_SUB2_IMAGE_MODEL if name == "banana" else name
+    configured_model = cfg.get("model") or DEFAULT_MODEL_BY_PROVIDER.get(
+        name, DEFAULT_SUB2_IMAGE_MODEL
     )
     available = getattr(args, "available_models", None)
     if args.model:
@@ -1399,8 +1406,9 @@ def main(argv=None):
     p.add_argument("prompt", nargs="?", help="生图提示词")
     p.add_argument("--prompt-file", dest="prompt_file",
                    help="从文件批量读取提示词，一行一条（忽略空行和 # 注释）")
-    p.add_argument("--provider", "-p", default="banana",
-                   help="provider 名，逗号分隔可同时多个；'all' 表示配置里全部。默认 banana")
+    p.add_argument("--provider", "-p", default=DEFAULT_PROVIDER,
+                   help=f"provider 名，逗号分隔可同时多个；'all' 表示配置里全部。"
+                        f"默认 {DEFAULT_PROVIDER}（gpt-image-2）；banana 是兼容别名")
     p.add_argument("--image", "-i", action="append", default=[],
                    help="输入图：本地路径、图片 URL、Data URL 或 Base64；可重复")
     p.add_argument("--mask", help="编辑遮罩图；仅与 --image 图片编辑一起使用，尺寸须与第一张输入图一致")

@@ -171,6 +171,13 @@ class GenimgEndToEndTests(unittest.TestCase):
             self.assertEqual([], list((Path(tmp) / "output").glob("run-*.json")))
             self.assertEqual([], [r for r in relay.requests if r["method"] == "POST"])
 
+    def test_default_provider_is_image2_without_any_flag(self):
+        with MockRelay() as relay, tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli("genimg.py", ["柴犬"], tmp, relay)
+            self.assertEqual(0, proc.returncode, proc.stdout)
+            self.assertIn("[image2]", proc.stdout)
+            self.assertEqual("gpt-image-2", relay.httpd.last_image_request["model"])
+
     def test_banana_auto_switches_to_an_available_model(self):
         with MockRelay() as relay, tempfile.TemporaryDirectory() as tmp:
             proc = run_cli("genimg.py", ["柴犬", "--provider", "banana"], tmp, relay)

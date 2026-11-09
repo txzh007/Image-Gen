@@ -19,14 +19,35 @@ class RequestBodyTests(unittest.TestCase):
         values.update(overrides)
         return SimpleNamespace(**values)
 
-    def test_builtin_providers_are_banana_and_image2(self):
+    def test_image2_is_the_default_provider(self):
         config_path = Path(__file__).resolve().parents[1] / "providers.example.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
         config.pop("_comment", None)
 
-        self.assertEqual(["banana", "image2"], list(config))
-        self.assertEqual("gpt-image-gemini-flash", config["banana"]["model"])
+        self.assertEqual(["image2", "banana"], list(config))
         self.assertEqual("gpt-image-2", config["image2"]["model"])
+        self.assertEqual("gpt-image-gemini-flash", config["banana"]["model"])
+        self.assertEqual("image2", genimg.DEFAULT_PROVIDER)
+        self.assertEqual("gpt-image-2", genimg.DEFAULT_SUB2_IMAGE_MODEL)
+
+    def test_default_provider_resolves_to_gpt_image_2(self):
+        env = {"IMAGE_API_BASE": "https://sub2.example/v1", "GENIMG_API_KEY": "k"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            provider = genimg.resolve_provider("image2", {}, self.provider_args())
+        self.assertEqual("gpt-image-2", provider["model"])
+
+    def test_unknown_provider_name_does_not_become_a_model_name(self):
+        # 以前会把 provider 名直接当模型名发给中转，现在回落到默认模型
+        env = {"IMAGE_API_BASE": "https://sub2.example/v1", "GENIMG_API_KEY": "k"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            provider = genimg.resolve_provider("whatever", {}, self.provider_args())
+        self.assertEqual("gpt-image-2", provider["model"])
+
+    def test_banana_remains_available_as_compat_alias(self):
+        env = {"IMAGE_API_BASE": "https://sub2.example/v1", "GENIMG_API_KEY": "k"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            provider = genimg.resolve_provider("banana", {}, self.provider_args())
+        self.assertEqual("gpt-image-gemini-flash", provider["model"])
 
     def test_images_request_includes_sub2_model_alias(self):
         body = genimg.build_generation_body(
