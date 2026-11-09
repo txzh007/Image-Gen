@@ -52,6 +52,32 @@ $env:GENIMG_REPO="https://github.com/txzh007/Image-Gen.git"
 - `~/.claude/skills/genimg`
 - `~/.opencode/skills/genimg`
 
+## 一句话上手（交给 agent）
+
+装好后把下面这句丢给 Codex / Claude Code / OpenCode，agent 会自己读 skill、跑自检、
+缺配置时向你索要，然后出图：
+
+> 读 `~/.codex/skills/genimg/SKILL.md` 并照做：先跑 `genimg.py --list-models` 自检；
+> 缺 `IMAGE_API_BASE` 或 `GENIMG_API_KEY` 就向我要，拿到后 export 再重试；能列出模型就
+> 问我画什么、多大尺寸，出图后把模型、绝对路径和实际尺寸报给我。
+
+路径按平台换：Claude Code 用 `~/.claude/skills/genimg/SKILL.md`，OpenCode 用
+`~/.opencode/skills/genimg/SKILL.md`；Windows 把 `~` 换成 `$env:USERPROFILE`、
+`python3` 换成 `python`。
+
+agent 照做时会经历两次状态，都是正常输出，不是报错：
+
+```text
+# 还没配置
+未设置 IMAGE_API_BASE，查不到模型列表。先执行：
+  export IMAGE_API_BASE='https://你的中转站/v1'
+  export GENIMG_API_KEY='sk-xxx'
+
+# 配置好后
+账号可用模型 4 个，其中疑似生图模型 4 个：
+  1) gpt-image-2  ← 已知
+```
+
 ## 配置
 
 macOS / Linux：

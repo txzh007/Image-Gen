@@ -184,5 +184,23 @@ class VideoModelListingTests(unittest.TestCase):
             self.assertFalse(genvideo.looks_like_video_model(name), name)
 
 
+class CreateErrorHintTests(unittest.TestCase):
+    def test_gateway_error_warns_about_duplicate_task(self):
+        hint = genvideo.explain_create_error(502, None, b"error code: 502")
+        self.assertIn("502", hint)
+        self.assertIn("重复付费", hint)
+
+    def test_model_not_found_points_to_list_models(self):
+        hint = genvideo.explain_create_error(
+            400,
+            {"error": {"message": 'Model "x" is not available for this group'}},
+            b"",
+        )
+        self.assertIn("--list-models", hint)
+
+    def test_success_has_no_hint(self):
+        self.assertIsNone(genvideo.explain_create_error(200, {"task_id": "x"}, b""))
+
+
 if __name__ == "__main__":
     unittest.main()

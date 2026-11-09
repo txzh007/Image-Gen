@@ -75,6 +75,8 @@ IMAGE_MODEL_HINTS = (
 NON_IMAGE_MODEL_HINTS = (
     "embedding", "embed", "tts", "whisper", "rerank", "moderation",
     "transcribe", "asr", "ocr",
+    # 视频模型名里常带 imagine/image 字样（如 grok-imagine-video-1.5），必须排除
+    "video", "seedance", "veo-", "sora", "kling", "hailuo",
 )
 # 自动择优的优先级：只放便宜/常规图片模型，Pro 级必须用户显式指定。
 AUTO_MODEL_PREFERENCE = (

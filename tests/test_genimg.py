@@ -524,6 +524,16 @@ class ModelClassificationTests(unittest.TestCase):
                      "grok-imagine-image-2.0", "flux-pro-1.1", "seedream-4"):
             self.assertTrue(genimg.looks_like_image_model(name), name)
 
+    def test_video_models_are_not_treated_as_image_models(self):
+        for name in ("grok-imagine-video-1.5", "grok-imagine-video",
+                     "video-ds-2.0-fast", "seedance-1.0-pro"):
+            self.assertFalse(genimg.looks_like_image_model(name), name)
+
+    def test_video_image_pairing_still_works(self):
+        # 同一个厂商既有图片模型也有视频模型时，两类都要分开
+        self.assertTrue(genimg.looks_like_image_model("grok-imagine-image-2.0"))
+        self.assertFalse(genimg.looks_like_image_model("grok-imagine-video-1.5"))
+
     def test_text_and_embedding_models_are_not_images(self):
         for name in ("deepseek-v4-flash", "glm-5.3", "kimi-k3.1-pro",
                      "text-embedding-3-small", "tts-1-hd"):

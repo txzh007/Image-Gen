@@ -283,6 +283,28 @@ def error_message(status, parsed, raw):
     return f"HTTP {status}: {raw.decode('utf-8', 'replace')[:500]}"
 
 
+def explain_create_error(status, parsed, raw):
+    """创建失败时的针对性诊断。
+
+    视频任务创建刻意不自动重试 502/504：上游可能已经建好任务只是响应丢了，
+    盲目重试会产生第二个付费任务。
+    """
+    if status in (502, 504):
+        return (
+            f"网关 {status}：中转上游没有正常响应。任务通常没建成，但也可能已建成而响应丢失——"
+            "先 `--list-tasks` 看本地记录、到中转后台核对用量，再手动重试，避免重复付费。"
+        )
+    if status == 429:
+        return "限流：稍等再试，不要连续重试。"
+    if status in (401, 403):
+        return "鉴权失败：检查 GENIMG_API_KEY 是否有效、是否有该模型权限。"
+    if status == 400 and isinstance(parsed, dict):
+        message = str(parsed.get("error") or parsed.get("message") or "")
+        if "model_not_found" in message or "not available" in message:
+            return "该模型未对当前分组开放：先跑 `--list-models` 看账号有哪些视频模型。"
+    return None
+
+
 def extract_task_id(payload):
     if not isinstance(payload, dict):
         return None
@@ -674,6 +696,9 @@ def main(argv=None):
         )
         if status >= 300 or payload is None:
             print(f"[video] ✗ 创建失败：{error_message(status, payload, raw)}")
+            hint = explain_create_error(status, payload, raw)
+            if hint:
+                print(f"[video] → {hint}")
             return 1
         task_id = extract_task_id(payload)
         if not task_id:
