@@ -534,6 +534,20 @@ class ErrorHintTests(unittest.TestCase):
         )
         self.assertTrue(any("内容审核" in h for h in hints))
 
+    def test_no_eligible_account_hint(self):
+        hints = genimg.explain_error(
+            503, '{"error":{"message":"No eligible Grok media accounts"}}', "grok-imagine-video"
+        )
+        self.assertTrue(any("上游账号" in h for h in hints))
+
+    def test_not_supported_by_configured_account_hint(self):
+        hints = genimg.explain_error(
+            404,
+            '{"message":"Model \"x\" is not supported by any configured account in this group"}',
+            "grok-imagine-image-2.0",
+        )
+        self.assertTrue(any("上游账号" in h for h in hints))
+
     def test_retryable_hint(self):
         hints = genimg.explain_error(429, "busy", "gpt-image-gemini-flash")
         self.assertTrue(any("退避重试" in h for h in hints))

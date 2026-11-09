@@ -289,6 +289,16 @@ def explain_create_error(status, parsed, raw):
     视频任务创建刻意不自动重试 502/504：上游可能已经建好任务只是响应丢了，
     盲目重试会产生第二个付费任务。
     """
+    message = ""
+    if isinstance(parsed, dict):
+        error = parsed.get("error") or parsed.get("message") or ""
+        message = str(error if not isinstance(error, dict) else error.get("message") or error)
+    lowered = message.lower()
+    if "no eligible" in lowered or "not supported by any configured account" in lowered:
+        return (
+            "中转分组没有可用的上游账号（No eligible …accounts）：渠道侧配置问题，与 Key 无关。"
+            "需要中转管理员为该分组接入上游账号，再重试；不要反复重试。"
+        )
     if status in (502, 504):
         return (
             f"网关 {status}：中转上游没有正常响应。任务通常没建成，但也可能已建成而响应丢失——"

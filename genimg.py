@@ -1110,11 +1110,20 @@ def explain_error(status, snippet, model):
         )
     if "model_not_found" in lowered or "model not found" in lowered:
         hints.append(
-            f"中转没有开通 {model}；改用 --provider banana，"
-            "或让中转管理员确认该模型渠道。"
+            f"中转没有开通 {model}：先跑 --list-models 看账号实际可用模型，"
+            "再用 --model 指定，不要反复重试同一个模型。"
         )
-    if "no available compatible accounts" in lowered or "无可用渠道" in snippet:
-        hints.append("当前分组没有可调度渠道：稍后重试，或换另一个 provider。")
+    no_account_markers = (
+        "no eligible", "not supported by any configured account",
+        "no available compatible accounts", "无可用渠道",
+    )
+    no_account = any(marker in lowered for marker in no_account_markers)
+    if no_account:
+        hints.append(
+            "中转分组里没有可用的上游账号（No eligible / not supported by any configured "
+            "account）：这是中转侧的渠道配置问题，与你的 Key 无关。需要中转管理员给该分组接入"
+            "上游账号；期间先用 --list-models 换一个渠道正常的模型。"
+        )
     if "insufficient" in lowered or "quota" in lowered or "余额" in snippet:
         hints.append("中转余额/额度不足；充值后再跑，不要靠换模型硬试。")
     if status in (401, 403):
@@ -1126,7 +1135,7 @@ def explain_error(status, snippet, model):
             "中转网关 502/504（上游过载或超时）：脚本已自动退避重试；仍失败说明上游持续"
             "异常，稍后再试，或降 --size / 稍后换时段。"
         )
-    elif status in RETRYABLE_HTTP_STATUSES:
+    elif status in RETRYABLE_HTTP_STATUSES and not no_account:
         hints.append("已按 2/4/8 秒退避重试 3 次仍失败；稍后再试。")
     policy_markers = (
         "content_policy", "policy_violation", "policy_refusal", "moderation",

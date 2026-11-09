@@ -198,6 +198,15 @@ class CreateErrorHintTests(unittest.TestCase):
         )
         self.assertIn("--list-models", hint)
 
+    def test_no_eligible_account_is_explained(self):
+        hint = genvideo.explain_create_error(
+            503,
+            {"error": {"message": "No eligible Grok media accounts",
+                       "type": "grok_media_no_eligible_account"}},
+            b"",
+        )
+        self.assertIn("上游账号", hint)
+
     def test_success_has_no_hint(self):
         self.assertIsNone(genvideo.explain_create_error(200, {"task_id": "x"}, b""))
 
