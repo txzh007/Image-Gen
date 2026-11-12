@@ -305,6 +305,18 @@ python3 genimg.py "只在透明区域添加足球" --provider image2 \
 URL 会先下载，Base64 会先解码；脚本校验图片签名后，以内存 multipart 文件上传到
 Sub2。不会把 URL 或 Base64 当成普通文本字段发送。单张输入最大 20 MB。
 
+## GIF / 动图
+
+Images API **不返回 GIF** —— OpenAI Images 2.6 的循环 GIF 是 ChatGPT 应用功能，
+实测中转对 `format=gif`、`response_format=gif` 都返回 PNG。要 GIF 用视频转：
+
+```bash
+python3 togif.py output/clip.mp4 --start 5 --duration 3
+python3 togif.py output/clip.mp4 --width 480 --fps 12 --colors 96 --out banner.gif
+```
+
+需要系统安装 `ffmpeg`。工具用 `palettegen` + `paletteuse` 两遍调色板，避免 GIF 常见色带。
+
 ## 视频任务
 
 ### 时长与分辨率字段

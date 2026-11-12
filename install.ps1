@@ -41,6 +41,7 @@ if ((Get-Command git -ErrorAction SilentlyContinue) -and $env:GENIMG_REPO) {
         "$scriptDir\genimg.py", `
         "$scriptDir\genvideo.py", `
         "$scriptDir\upload.py", `
+        "$scriptDir\togif.py", `
         "$scriptDir\SKILL.md", `
         "$scriptDir\README.md", `
         "$scriptDir\providers.example.json", `

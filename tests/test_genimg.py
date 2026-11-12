@@ -492,6 +492,26 @@ class SaveImageTests(unittest.TestCase):
         self.assertEqual("image/png", info["mime"])
         self.assertEqual(16, len(info["sha256"]))
 
+    def test_dotted_filename_is_not_truncated(self):
+        # 回归：poster-2.6-flare 会被 with_suffix 吞成 poster-2
+        raw = ImageProbeTests.png(8, 8)
+        encoded = genimg.base64.b64encode(raw).decode("ascii")
+        with tempfile.TemporaryDirectory() as tmp:
+            info = genimg.save_image(
+                "b64", encoded, Path(tmp) / "poster-2.6-flare", timeout=5
+            )
+        self.assertTrue(info["path"].endswith("/poster-2.6-flare.png"), info["path"])
+
+    def test_existing_extension_is_not_doubled(self):
+        raw = ImageProbeTests.png(8, 8)
+        encoded = genimg.base64.b64encode(raw).decode("ascii")
+        with tempfile.TemporaryDirectory() as tmp:
+            info = genimg.save_image(
+                "b64", encoded, Path(tmp) / "shot.png", timeout=5
+            )
+        self.assertTrue(info["path"].endswith("/shot.png"), info["path"])
+        self.assertNotIn(".png.png", info["path"])
+
     def test_url_payload_that_is_html_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(genimg, "http_get_bytes", return_value=b"<html>403</html>"):

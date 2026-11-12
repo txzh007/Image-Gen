@@ -1005,7 +1005,14 @@ def save_image(kind, payload, out_base, timeout, auth=None):
         snippet = raw[:160].decode("utf-8", "replace").strip()
         raise ValueError(f"返回内容不是图片（可能是错误页、防盗链或过期链接）：{snippet}")
     ext = EXT_BY_MIME[mime]
-    out_path = out_base.with_suffix(ext)
+    # 注意不能用 with_suffix：文件名里的点号会被当成后缀。
+    # 例如 "poster-2.6-flare" 的 suffix 是 ".6-flare"，with_suffix(".png")
+    # 会把它替换掉，得到 "poster-2.png"。这里改成直接拼接。
+    out_base_text = str(out_base)
+    if out_base_text.lower().endswith(ext):
+        out_path = Path(out_base_text)
+    else:
+        out_path = Path(out_base_text + ext)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
         f.write(raw)

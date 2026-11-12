@@ -37,6 +37,7 @@ else
         "$SCRIPT_DIR/genimg.py" \
         "$SCRIPT_DIR/genvideo.py" \
         "$SCRIPT_DIR/upload.py" \
+        "$SCRIPT_DIR/togif.py" \
         "$SCRIPT_DIR/configure-macos.sh" \
         "$SCRIPT_DIR/SKILL.md" \
         "$SCRIPT_DIR/README.md" \

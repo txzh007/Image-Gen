@@ -303,6 +303,23 @@ python3 genimg.py "赛博朋克街景" --provider image2,banana --jobs 2
 有 `⚠` 参数未生效时必须一并说明（例：「size 请求 1024×1024，实际返回 1254×1254」），不许只报请求值。
 生成失败时回报 HTTP 状态与中转原文关键句，加上脚本给出的下一步提示，不要编造成功。
 
+## GIF / 动图
+
+**Images API 不返回 GIF。** OpenAI Images 2.6 的循环 GIF 是 ChatGPT 应用功能，不走
+`/v1/images/generations` —— 实测中转对 `format=gif` / `response_format=gif` 都返回 PNG
+（HTTP 200 但产物是 `.png`）。看到这类请求别当成 GIF 交付。
+
+要 GIF 就走视频转，结果是真循环 GIF：
+
+```bash
+python3 togif.py output/clip.mp4 --start 5 --duration 3   # 截 5s 起 3 秒
+python3 togif.py output/clip.mp4 --width 480 --fps 12 --colors 96
+```
+
+- 需要系统 `ffmpeg`（`brew install ffmpeg` / `choco install ffmpeg`）
+- `--fps` 12–15 足够；`--colors` 128 起，文件超 3 MB 就降到 96 并减小 `--width`
+- 生成后报告实际尺寸、帧数与体积
+
 ## 视频工作流
 
 **先确认账号有没有视频能力**（免费，不创建任务）：
