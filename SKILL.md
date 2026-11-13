@@ -143,7 +143,8 @@ python3 genimg.py "提示词" --model gpt-image-2.5-flare   # 显式指定任意
 | png / jpg / webp、压小一点 | `--output-format` + `--output-compression` | 必须校验是否生效 |
 | 高清、2K、4K、质量高一点 | `--quality` | 实测无效，改走换模型或加尺寸 |
 | 指定或换模型 | `--model NAME` | 不指定则自动择优 |
-| 种子、复现同一张 | `--param seed=42` | 中转支持才有效 |
+| 种子、复现同一张 | `--param seed=42` |
+| 动图 / GIF | `--output-format gif` | 需中转支持，且尺寸会压缩 | 中转支持才有效 |
 | 中转私有字段 | `--param key=value` | 支持 `a.b=value` 嵌套 |
 
 用户没提的一律用 provider 默认值：不擅自上 Pro、4K、透明底或更大尺寸。
@@ -305,11 +306,20 @@ python3 genimg.py "赛博朋克街景" --provider image2,banana --jobs 2
 
 ## GIF / 动图
 
-**Images API 不返回 GIF。** OpenAI Images 2.6 的循环 GIF 是 ChatGPT 应用功能，不走
-`/v1/images/generations` —— 实测中转对 `format=gif` / `response_format=gif` 都返回 PNG
-（HTTP 200 但产物是 `.png`）。看到这类请求别当成 GIF 交付。
+能否出 GIF **取决于中转**：OpenAI 官方把循环 GIF 放在 ChatGPT 应用里，Images API 不保证
+支持。两种实测结果都遇到过 ——
 
-要 GIF 就走视频转，结果是真循环 GIF：
+- 旧渠道：`format=gif` / `response_format=gif` 返回 HTTP 200 但产物是 **PNG**（参数被忽略）
+- 新渠道：`output_format: "gif"` 返回真 **GIF89a**，多帧 + NETSCAPE 循环扩展
+
+只能用 `output_format` 试，拿到文件后**必须验签名**（`GIF89a` 开头才算成功）：
+
+```bash
+python3 genimg.py "一个挥手的小机器人，循环动画" --output-format gif --out ./out.gif
+```
+
+实测：请求 `size 1024x1024` 时 GIF 实际只有 **412x414** —— GIF 模式会压尺寸，别按请求值
+汇报。文件质量不满意就退回视频转 GIF：
 
 ```bash
 python3 togif.py output/clip.mp4 --start 5 --duration 3   # 截 5s 起 3 秒

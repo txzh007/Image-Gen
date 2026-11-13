@@ -173,7 +173,7 @@ provider 只是「默认参数包」，真正发给中转的是模型名。**默
 
 | provider | 默认模型 | 默认参数 | 生成/编辑接口 |
 |---|---|---|---|
-| `image2`（默认） | `gpt-image-2` | `size/quality/output_format/n` | `/images/generations`、`/images/edits` |
+| `image2`（默认） | `gpt-image-2` | 仅 `n=1`，其余参数全部显式传 | `/images/generations`、`/images/edits` |
 | `banana`（兼容） | `gpt-image-gemini-flash` | `n=1` | 同上 |
 
 `banana` 是 `gpt-banana` 系列的历史兼容别名，**不是真实模型** —— 只有账号里确实存在
@@ -307,8 +307,17 @@ Sub2。不会把 URL 或 Base64 当成普通文本字段发送。单张输入最
 
 ## GIF / 动图
 
-Images API **不返回 GIF** —— OpenAI Images 2.6 的循环 GIF 是 ChatGPT 应用功能，
-实测中转对 `format=gif`、`response_format=gif` 都返回 PNG。要 GIF 用视频转：
+GIF 能否直出**取决于中转**。官方把循环 GIF 放在 ChatGPT 应用里，Images API 不保证支持：
+
+- 有的渠道忽略 `format=gif`，返回 PNG
+- 有的渠道认 `output_format: "gif"`，返回真 GIF89a（多帧 + 循环）
+
+```bash
+python3 genimg.py "一个挥手的小机器人，循环动画" --output-format gif --out ./out.gif
+```
+
+实测 GIF 模式下尺寸会被压缩（请求 1024×1024 实际得到 412×414），按实际值汇报。
+拿不到时就退回视频转 GIF：
 
 ```bash
 python3 togif.py output/clip.mp4 --start 5 --duration 3
