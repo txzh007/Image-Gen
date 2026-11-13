@@ -356,6 +356,26 @@ python3 genvideo.py "雨夜城市" --model grok-imagine-video --duration 5 --res
 
 给了 `--duration` 不再发 `seconds`，给了 `--resolution` 不再发 `aspect_ratio`。
 
+### 图片：resolution / width+height / 异步任务
+
+```bash
+# 超分分组：按 size 的比例配合 resolution 定目标尺寸（按 Key 路由）
+python3 genimg.py "提示词" --size 1816x1024 --resolution 4K
+
+# 成对宽高（必须成对）
+python3 genimg.py "提示词" --width 2048 --height 1152
+
+# 异步（站点需启用；未启用返回 404，去掉 --async 走同步即可）
+python3 genimg.py "提示词" --async --size 4K
+python3 genimg.py "提示词" --async --no-wait
+python3 genimg.py --task-id TASK_ID --out ./out.png     # 续查，不重复提交
+python3 genimg.py --resume-last
+python3 genimg.py --list-tasks
+```
+
+异步任务创建成功后 task_id 写入 `.genimg-async-tasks.jsonl`；`--poll-interval`、
+`--wait-timeout` 控制轮询。
+
 ### 两种协议
 
 `genvideo.py` 支持两套请求字段，端点骨架相同（`POST /v1/videos` → 轮询 → `/content` 下载）：
