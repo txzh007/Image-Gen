@@ -568,6 +568,16 @@ class ErrorHintTests(unittest.TestCase):
         )
         self.assertTrue(any("上游账号" in h for h in hints))
 
+    def test_recovery_exhausted_warns_against_retry(self):
+        hints = genimg.explain_error(
+            500,
+            '{"error":{"code":"image_recovery_exhausted",'
+            '"message":"图片交付恢复未完成，请使用原任务编号查询详情，不要重复生图。"}}',
+            "gpt-image-2.6-flare",
+        )
+        self.assertTrue(any("交付" in h for h in hints))
+        self.assertTrue(any("重复扣费" in h for h in hints))
+
     def test_retryable_hint(self):
         hints = genimg.explain_error(429, "busy", "gpt-image-gemini-flash")
         self.assertTrue(any("退避重试" in h for h in hints))

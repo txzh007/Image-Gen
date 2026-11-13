@@ -1,17 +1,15 @@
 {
-  "_comment": "地址和 Key 只从 IMAGE_API_BASE、GENIMG_API_KEY 读取；本文件只配置模型和请求参数。image2 是默认 provider（gpt-image-2）；banana 为 gpt-banana 兼容别名，不是真实模型。",
-
+  "_comment": "地址和 Key 只从 IMAGE_API_BASE、GENIMG_API_KEY 读取。provider 只决定默认模型，不预置请求参数——参数一律由命令行显式给出，避免悄悄加上 size/quality 干扰结果。image2 为默认；banana 为 gpt-banana 兼容别名。",
   "image2": {
     "model": "gpt-image-2",
     "defaults": {
-      "size": "1024x1024",
-      "quality": "high",
-      "output_format": "png",
       "n": 1
     }
   },
   "banana": {
     "model": "gpt-image-gemini-flash",
-    "defaults": {"n": 1}
+    "defaults": {
+      "n": 1
+    }
   }
 }

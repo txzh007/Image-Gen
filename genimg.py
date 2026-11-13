@@ -1131,6 +1131,11 @@ def explain_error(status, snippet, model):
             "account）：这是中转侧的渠道配置问题，与你的 Key 无关。需要中转管理员给该分组接入"
             "上游账号；期间先用 --list-models 换一个渠道正常的模型。"
         )
+    if "image_recovery_exhausted" in lowered or "交付恢复未完成" in snippet:
+        hints.append(
+            "图片已经生成但交付（回传/上传）失败 —— 不是模型问题，重试通常会重复扣费。"
+            "中转提示用原任务编号查询交付结果：稍等再试，或让管理员按该任务号补发图片。"
+        )
     if "insufficient" in lowered or "quota" in lowered or "余额" in snippet:
         hints.append("中转余额/额度不足；充值后再跑，不要靠换模型硬试。")
     if status in (401, 403):
@@ -1436,8 +1441,9 @@ def main(argv=None):
     p.add_argument("--response-format", dest="response_format", choices=["url", "b64_json"],
                    help="返回格式（DALL-E 2/3）：url 或 b64_json")
     p.add_argument("--aspect-ratio", dest="aspect_ratio", help="宽高比，如 9:16、16:9")
-    p.add_argument("--output-format", dest="output_format", choices=["png", "jpeg", "webp"],
-                   help="输出编码（GPT Image）：png、jpeg 或 webp")
+    p.add_argument("--output-format", dest="output_format",
+                   choices=["png", "jpeg", "webp", "gif"],
+                   help="输出编码：png、jpeg、webp；gif 需中转支持（2.6 部分渠道可出循环动图）")
     p.add_argument("--output-compression", dest="output_compression", type=int,
                    help="JPEG/WEBP 压缩质量 0-100（GPT Image）")
     p.add_argument("--background", choices=["auto", "transparent", "opaque"],
