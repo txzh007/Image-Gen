@@ -38,6 +38,11 @@ HERE = Path(__file__).resolve().parent
 CONFIG_NAMES = ["providers.json", "providers.local.json", "providers.example.json"]
 GENERATION_ENDPOINT = "/images/generations"
 EDIT_ENDPOINT = "/images/edits"
+ASYNC_GENERATION_ENDPOINT = "/images/generations/async"
+ASYNC_EDIT_ENDPOINT = "/images/edits/async"
+TASK_ENDPOINT = "/images/tasks"
+ASYNC_SUCCESS_STATES = {"completed", "done", "succeeded", "success", "finished", "ready"}
+ASYNC_FAILURE_STATES = {"failed", "cancelled", "canceled", "expired", "error"}
 
 REQUEST_OPTION_NAMES = (
     "size",
@@ -51,6 +56,11 @@ REQUEST_OPTION_NAMES = (
     "moderation",
     "style",
     "user",
+    # 官方 Images 兼容：resolution 用于超分分组，width/height 可成对提交；
+    # 非 auto 的 size 优先于 width/height。
+    "resolution",
+    "width",
+    "height",
 )
 
 GEMINI_IMAGE_SIZES = {"0.5K", "512", "1K", "2K", "4K"}
@@ -814,6 +824,7 @@ def build_edit_fields(model, prompt, options=None, extra_body=None):
     for name in (
         "size", "quality", "response_format", "output_format", "output_compression",
         "background", "moderation", "style", "user",
+        "resolution", "width", "height",
     ):
         if options.get(name) is not None:
             fields[name] = options[name]
@@ -887,6 +898,9 @@ def build_generation_body(model, prompt, options=None, extra_body=None):
         "moderation",
         "style",
         "user",
+        "resolution",
+        "width",
+        "height",
     ):
         if options.get(name) is not None:
             body[name] = options[name]
@@ -1110,6 +1124,14 @@ def explain_error(status, snippet, model):
     """把常见中转报错翻译成可执行的下一步，返回提示行列表。"""
     lowered = snippet.lower()
     hints = []
+    if "async image tasks are not enabled" in lowered or (
+        status == 404 and "async" in lowered
+    ):
+        hints.append(
+            "该站点未启用异步图片任务（async image tasks are not enabled）："
+            "去掉 --async 走同步 /images/generations；4K 实测 47–75s 可同步完成，"
+            "不需要异步。"
+        )
     if "images endpoint requires an image model" in lowered:
         hints.append(
             "model 必须是 Sub2 图片别名：gpt-image-gemini-flash / "
@@ -1160,6 +1182,191 @@ def explain_error(status, snippet, model):
             "需要稳定出图时用 --model gpt-image-2。"
         )
     return hints
+
+
+# ----------------------------------------------------------------------------- 异步图片任务
+
+IMAGE_TASK_LOG_NAME = ".genimg-async-tasks.jsonl"
+
+
+def extract_image_task_id(payload):
+    """从异步创建响应里找 task_id；兼容常见别名与嵌套结构。"""
+    if not isinstance(payload, dict):
+        return None
+    for field in ("task_id", "id", "request_id", "job_id", "taskId", "task_ids"):
+        value = payload.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, list) and value and isinstance(value[0], str):
+            return value[0].strip()
+    for wrapper in ("data", "task", "result", "output"):
+        inner = payload.get(wrapper)
+        if isinstance(inner, dict):
+            found = extract_image_task_id(inner)
+            if found:
+                return found
+    return None
+
+
+def http_get_json(url, headers, timeout):
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status, raw = resp.status, resp.read()
+    except urllib.error.HTTPError as error:
+        status, raw = error.code, error.read()
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except Exception:
+        parsed = None
+    return status, parsed, raw
+
+
+def poll_image_task(base_url, task_id, headers, args, label):
+    """轮询 /images/tasks/{task_id}，成功时返回含图片的最终 payload。"""
+    task_url = join_url(base_url, TASK_ENDPOINT) + "/" + task_id
+    deadline = time.monotonic() + args.wait_timeout
+    last_summary = None
+    while True:
+        status, payload, raw = http_get_json(task_url, headers, args.timeout)
+        if status >= 300 or payload is None:
+            snippet = redact_text(raw.decode("utf-8", "replace")[:300])
+            raise RuntimeError(f"查询任务失败 HTTP {status}: {snippet}")
+        state = str(payload.get("status", "unknown")).lower()
+        progress = payload.get("progress")
+        summary = (state, progress)
+        if summary != last_summary:
+            print(
+                f"[{label}] 任务状态={state}, "
+                f"进度={progress if progress is not None else '?'}%"
+            )
+            last_summary = summary
+        if state in ASYNC_SUCCESS_STATES:
+            return payload
+        if state in ASYNC_FAILURE_STATES:
+            detail = payload.get("error") or payload.get("message") or "未知错误"
+            raise RuntimeError(f"图片任务 {state}: {detail}")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"等待超过 {args.wait_timeout} 秒；任务仍可续查："
+                f"python3 genimg.py --task-id {task_id}"
+            )
+        time.sleep(args.poll_interval)
+
+
+def async_task_log_path(args):
+    base = Path(args.out).parent if args.out else Path(args.outdir)
+    return base / IMAGE_TASK_LOG_NAME
+
+
+def record_async_task(path, entry):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as error:
+        print(f"[task] ⚠ 任务记录写入失败：{error}", file=sys.stderr)
+
+
+def read_async_tasks(path):
+    if not path.is_file():
+        return []
+    entries = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
+def latest_async_task(entries, only_pending=False):
+    terminal = ASYNC_SUCCESS_STATES | ASYNC_FAILURE_STATES
+    candidates = entries
+    if only_pending:
+        pending = [
+            item for item in entries
+            if str(item.get("status", "")).lower() not in terminal
+        ]
+        candidates = pending or entries
+    return candidates[-1] if candidates else None
+
+
+def print_async_tasks(entries, log_path):
+    if not entries:
+        print(f"本地没有异步任务记录：{log_path}")
+        return
+    print(f"异步任务记录：{log_path}（共 {len(entries)} 条）")
+    for item in entries:
+        print(
+            f"  {item.get('created_at', '?')}  {item.get('task_id', '?')}  "
+            f"status={item.get('status', '?')}  model={item.get('model', '?')}"
+        )
+
+
+def save_parsed_images(parsed, prov, args, record, label,
+                       single_target=True, name_tag=""):
+    """从任意响应里抽图并落盘；供同步、异步轮询、--task-id 续查共用。"""
+    images = extract_images(parsed)
+    if not images:
+        print(f"[{label}] ✗ 没在返回里找到图片。用 --debug 查看响应结构。")
+        record["error"] = "响应中没有图片"
+        return record
+
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    multi = len(images) > 1
+    for i, (kind, payload) in enumerate(images):
+        suffix = f"_{i}" if multi else ""
+        if args.out:
+            base = Path(args.out)
+            provider_tag = "" if single_target else f"_{label}"
+            out_base = base.with_name(base.stem + provider_tag + name_tag + suffix)
+        else:
+            out_base = Path(args.outdir) / f"{label}{name_tag}_{stamp}{suffix}"
+        try:
+            info = save_image(
+                kind, payload, out_base, args.timeout,
+                auth=(prov["base_url"], prov["api_key"]),
+            )
+            print(
+                f"[{label}] ✓ 保存 {info['path']}  "
+                f"({describe_dimensions(info['width'], info['height'])}, "
+                f"{info['mime']}, {info['bytes'] // 1024} KB, 来源 {kind})"
+            )
+            record["saved"].append(info)
+        except Exception as e:
+            print(f"[{label}] ✗ 保存失败: {e}")
+            record["error"] = f"保存失败: {e}"
+
+    warnings = verify_requested_params(prov["request_options"], record["saved"])
+    if warnings:
+        record["parameter_warnings"] = warnings
+        for warning in warnings:
+            print(f"[{label}] ⚠ {warning}")
+    started = record.get("_started", time.monotonic())
+    record["elapsed_s"] = round(time.monotonic() - started, 3)
+    print(f"[{label}] 耗时 {record['elapsed_s']}s")
+    return record
+
+
+def read_prompt_file(path):
+    """从文本文件读取多条提示词：一行一条，忽略空行和 # 注释行。"""
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise ValueError(f"--prompt-file 不存在：{path}")
+    prompts = []
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        prompts.append(line)
+    if not prompts:
+        raise ValueError(f"--prompt-file 里没有有效提示词：{path}")
+    return prompts
+
 
 
 def run_one(prov, prompt, args, single_target=True, name_tag=""):
@@ -1265,7 +1472,31 @@ def run_one(prov, prompt, args, single_target=True, name_tag=""):
                 raise ValueError("banana 的 Pro 模型必须由用户明确指定 --model。")
         debug_body = body
 
+    use_async = bool(getattr(args, "async_mode", False)) and not getattr(args, "task_id", None)
+    if use_async:
+        url = join_url(
+            prov["base_url"],
+            ASYNC_EDIT_ENDPOINT if is_edit else ASYNC_GENERATION_ENDPOINT,
+        )
+        record["async"] = True
     record["endpoint"] = url
+
+    resume_id = getattr(args, "task_id", None)
+    if resume_id:
+        print(f"[{label}] 续查异步任务：{resume_id}")
+        try:
+            resumed = poll_image_task(prov["base_url"], resume_id, headers, args, label)
+        except Exception as error:
+            print(f"[{label}] ✗ {error}")
+            record["error"] = str(error)
+            return record
+        record["task_id"] = resume_id
+        record["async"] = True
+        record["_started"] = started
+        return save_parsed_images(
+            resumed, prov, args, record, label, single_target, name_tag
+        )
+
     operation = record["operation"]
     print(
         f"[{label}] POST {url}  "
@@ -1280,15 +1511,11 @@ def run_one(prov, prompt, args, single_target=True, name_tag=""):
         return record
 
     if is_edit:
-        status, raw = post_with_retries(
-            lambda: http_post_bytes(url, headers, request_data, args.timeout),
-            label=label,
-        )
+        post_once = lambda: http_post_bytes(url, headers, request_data, args.timeout)
     else:
-        status, raw = post_with_retries(
-            lambda: http_post_json(url, headers, body, args.timeout),
-            label=label,
-        )
+        post_once = lambda: http_post_json(url, headers, body, args.timeout)
+
+    status, raw = post_with_retries(post_once, label=label)
 
     try:
         parsed = json.loads(raw.decode("utf-8"))
@@ -1317,6 +1544,39 @@ def run_one(prov, prompt, args, single_target=True, name_tag=""):
         print(f"[{label}] ✗ 返回不是 JSON，无法解析。用 --debug 查看原始内容。")
         record["error"] = "响应不是 JSON"
         return record
+
+    if use_async:
+        task_id = extract_image_task_id(parsed)
+        if not task_id:
+            print(f"[{label}] ✗ 异步创建响应里没有 task_id；用 --debug 看结构。")
+            record["error"] = "异步响应缺少 task_id"
+            return record
+        print(f"[{label}] ✓ 异步任务已创建：{task_id}")
+        record["task_id"] = task_id
+        log_path = async_task_log_path(args)
+        record_async_task(log_path, {
+            "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
+            "task_id": task_id, "status": "created",
+            "model": prov["model"], "prompt": prompt,
+        })
+        print(f"[{label}] 已记录到 {log_path.resolve()}")
+        if getattr(args, "no_wait", False):
+            print(f"[{label}] 续查：python3 genimg.py --task-id {task_id}")
+            return record
+        try:
+            parsed = poll_image_task(prov["base_url"], task_id, headers, args, label)
+        except Exception as error:
+            print(f"[{label}] ✗ {error}")
+            record["error"] = str(error)
+            record_async_task(log_path, {
+                "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
+                "task_id": task_id, "status": "pending", "error": str(error),
+            })
+            return record
+        record_async_task(log_path, {
+            "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
+            "task_id": task_id, "status": "completed", "model": prov["model"],
+        })
 
     images = extract_images(parsed)
     if not images:
@@ -1436,7 +1696,10 @@ def main(argv=None):
     p.add_argument("--out", "-o", help="输出文件名；多图/多 provider 时自动加序号后缀")
     p.add_argument("--outdir", default="output", help="输出目录，默认 ./output")
     p.add_argument("--model", "-m", help="覆盖模型名")
-    p.add_argument("--size", help="尺寸，如 1024x1024 或 1536x1024")
+    p.add_argument("--size", help="尺寸：1024x1024、1536x1024、16:9、1K/2K/4K、auto")
+    p.add_argument("--resolution", help="超分分组用：2K/4K，配合 --size 的比例由服务端定目标尺寸")
+    p.add_argument("--width", type=int, help="宽度；与 --height 成对，非 auto 的 --size 优先")
+    p.add_argument("--height", type=int, help="高度；与 --width 成对")
     p.add_argument("--quality", help="质量，如 auto、low、high、2K、4K")
     p.add_argument("--response-format", dest="response_format", choices=["url", "b64_json"],
                    help="返回格式（DALL-E 2/3）：url 或 b64_json")
@@ -1460,6 +1723,20 @@ def main(argv=None):
                    help="追加/覆盖自定义 JSON 请求字段，可重复，支持 a.b=value")
     p.add_argument("--list-models", dest="list_models", action="store_true",
                    help="向中转查询账号可用的生图模型（免费，不生成图片）")
+    p.add_argument("--async", dest="async_mode", action="store_true",
+                   help="走异步端点 /images/generations|edits/async 并轮询 /images/tasks")
+    p.add_argument("--task-id", dest="task_id",
+                   help="续查已有异步任务，不重新提交生成请求")
+    p.add_argument("--resume-last", dest="resume_last", action="store_true",
+                   help="续查本地记录里最近一个未完成的异步任务")
+    p.add_argument("--list-tasks", dest="list_tasks", action="store_true",
+                   help="列出本地记录的异步任务（不联网）")
+    p.add_argument("--no-wait", dest="no_wait", action="store_true",
+                   help="异步创建后立即返回 task_id，不轮询")
+    p.add_argument("--poll-interval", dest="poll_interval", type=int, default=5,
+                   help="异步轮询间隔秒数，默认 5")
+    p.add_argument("--wait-timeout", dest="wait_timeout", type=int, default=900,
+                   help="异步总等待上限秒数，默认 900")
     p.add_argument("--pick-model", dest="pick_model", action="store_true",
                    help="交互式选择模型（仅终端；非交互环境自动跳过）")
     p.add_argument("--refresh-models", dest="refresh_models", action="store_true",
@@ -1506,6 +1783,31 @@ def main(argv=None):
                     f"defaults={defaults}"
                 )
         return 0
+
+    if args.poll_interval < 1 or args.wait_timeout < 1:
+        p.error("--poll-interval 与 --wait-timeout 必须大于 0")
+    if args.task_id and args.resume_last:
+        p.error("--task-id 与 --resume-last 只能二选一")
+    if args.width is not None and args.height is None or \
+            args.height is not None and args.width is None:
+        p.error("--width 与 --height 必须成对使用")
+
+    task_log = async_task_log_path(args)
+    if args.list_tasks:
+        print_async_tasks(read_async_tasks(task_log), task_log)
+        return 0
+    if args.resume_last:
+        last = latest_async_task(read_async_tasks(task_log), only_pending=True)
+        if not last or not last.get("task_id"):
+            p.error(f"本地没有可续查的异步任务记录：{task_log}")
+        args.task_id = last["task_id"]
+        print(f"[task] 从本地记录续查：{args.task_id}")
+    if args.task_id:
+        args.async_mode = False
+        if not getattr(args, "prompt", None) and not getattr(args, "prompt_file", None):
+            # 续查不需要提示词，给个占位避免下面的必填校验
+            args.prompt = "（续查任务，不提交新提示词）"
+            args.no_discover = True
 
     # ---- 模型发现：默认自动查询（带缓存），失败就回退配置默认，绝阻塞出图
     args.available_models = None
@@ -1596,6 +1898,14 @@ def main(argv=None):
             return 0
         print("dry-run 失败，没有构建出任何请求。")
         return 1
+    created_tasks = [
+        r.get("task_id") for r in records if r.get("task_id") and not r.get("saved")
+    ]
+    if args.no_wait and created_tasks and not saved:
+        print(f"已创建 {len(created_tasks)} 个异步任务（--no-wait，未等待）：")
+        for tid in created_tasks:
+            print(f"  {tid}  续查：python3 genimg.py --task-id {tid}")
+        return 0
     if saved:
         print(f"完成，共保存 {len(saved)} 张:")
         for item in saved:

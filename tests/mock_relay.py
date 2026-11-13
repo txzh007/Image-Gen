@@ -138,6 +138,19 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send(200, {"task_id": task_id, "status": "completed", "progress": 100})
             return
+        if path.startswith("/images/tasks/"):
+            task_id = path.rsplit("/", 1)[-1]
+            count = self.server.poll_counts.get(task_id, 0)
+            self.server.poll_counts[task_id] = count + 1
+            if count < 1:
+                self._send(200, {"task_id": task_id, "status": "in_progress", "progress": 50})
+            else:
+                import base64 as _b64
+                self._send(200, {
+                    "task_id": task_id, "status": "completed", "progress": 100,
+                    "data": [{"b64_json": _b64.b64encode(make_png(64, 32)).decode()}],
+                })
+            return
         if path == "/models":
             models = self.server.models
             if models is None:
@@ -157,6 +170,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._record(
             {"method": "POST", "path": path, "content_type": content_type, "body": body}
         )
+
+        if path.endswith("/images/generations/async"):
+            self._send(200, {"task_id": "img_task_mock_1", "status": "queued"})
+            return
 
         if path.endswith("/images/generations"):
             try:

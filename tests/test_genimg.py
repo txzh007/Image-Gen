@@ -537,6 +537,15 @@ class PromptFileTests(unittest.TestCase):
 
 
 class ErrorHintTests(unittest.TestCase):
+    def test_async_disabled_hint(self):
+        hints = genimg.explain_error(
+            404,
+            '{"error":{"code":"not_found_error",'
+            '"message":"async image tasks are not enabled"}}',
+            "gpt-image-2",
+        )
+        self.assertTrue(any("异步图片任务" in h for h in hints))
+
     def test_model_error_hint(self):
         hints = genimg.explain_error(400, "model_not_found: gpt-image-2", "gpt-image-2")
         self.assertTrue(any("中转没有开通" in h for h in hints))
@@ -840,6 +849,71 @@ class StdioEncodingTests(unittest.TestCase):
             genimg.configure_stdio()
         messages = " ".join(str(call) for call in fake_print.call_args_list)
         self.assertIn("chcp 65001", messages)
+
+
+class ResolutionFieldTests(unittest.TestCase):
+    def test_resolution_and_size_are_top_level_fields(self):
+        body = genimg.build_generation_body(
+            "gpt-image-2.6-flare", "cat",
+            options={"size": "1816x1024", "resolution": "4K", "n": 1},
+        )
+        self.assertEqual("1816x1024", body["size"])
+        self.assertEqual("4K", body["resolution"])
+
+    def test_width_height_pair_is_sent(self):
+        body = genimg.build_generation_body(
+            "gpt-image-2", "cat", options={"width": 2048, "height": 1152, "n": 1}
+        )
+        self.assertEqual(2048, body["width"])
+        self.assertEqual(1152, body["height"])
+
+    def test_edit_fields_include_resolution(self):
+        fields = genimg.build_edit_fields(
+            "gpt-image-2", "edit", options={"resolution": "2K", "n": 1}
+        )
+        self.assertEqual("2K", fields["resolution"])
+
+
+class AsyncTaskTests(unittest.TestCase):
+    def test_extract_task_id_from_common_shapes(self):
+        self.assertEqual("t1", genimg.extract_image_task_id({"task_id": "t1"}))
+        self.assertEqual("t2", genimg.extract_image_task_id({"id": "t2"}))
+        self.assertEqual("t3", genimg.extract_image_task_id(
+            {"data": {"request_id": "t3"}}
+        ))
+        self.assertEqual("t4", genimg.extract_image_task_id(
+            {"task_ids": ["t4"]}
+        ))
+
+    def test_poll_returns_on_done_state(self):
+        args = SimpleNamespace(wait_timeout=30, poll_interval=1, timeout=5, debug=False)
+        payloads = [
+            {"status": "in_progress", "progress": 20},
+            {"status": "done", "data": [{"b64_json": "YWJj"}]},
+        ]
+
+        def fake_get(url, headers, timeout):
+            return 200, payloads.pop(0), b""
+
+        with mock.patch.object(genimg, "http_get_json", side_effect=fake_get):
+            result = genimg.poll_image_task("https://x/v1", "t", {}, args, "image2")
+        self.assertEqual("done", result["status"])
+
+    def test_latest_pending_task(self):
+        entries = [
+            {"task_id": "a", "status": "completed"},
+            {"task_id": "b", "status": "created"},
+        ]
+        self.assertEqual("b", genimg.latest_async_task(entries, only_pending=True)["task_id"])
+
+    def test_async_log_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".genimg-async-tasks.jsonl"
+            genimg.record_async_task(path, {"task_id": "x", "status": "created"})
+            genimg.record_async_task(path, {"task_id": "x", "status": "completed"})
+            entries = genimg.read_async_tasks(path)
+        self.assertEqual(2, len(entries))
+        self.assertEqual("completed", entries[-1]["status"])
 
 
 if __name__ == "__main__":

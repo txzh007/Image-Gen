@@ -198,6 +198,40 @@ class GenimgEndToEndTests(unittest.TestCase):
                 "gpt-image-2.5-flare", relay.httpd.last_image_request["model"]
             )
 
+    def test_async_task_create_poll_and_download(self):
+        with MockRelay() as relay, tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli(
+                "genimg.py",
+                ["机器人", "--async", "--poll-interval", "1", "--out", "async.png"],
+                tmp,
+                relay,
+            )
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertIn("异步任务已创建：img_task_mock_1", proc.stdout)
+            self.assertTrue((Path(tmp) / "async.png").is_file(), proc.stdout)
+
+    def test_async_no_wait_returns_task_id(self):
+        with MockRelay() as relay, tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli(
+                "genimg.py", ["机器人", "--async", "--no-wait"], tmp, relay
+            )
+            self.assertEqual(0, proc.returncode, proc.stdout)
+            self.assertIn("img_task_mock_1", proc.stdout)
+            self.assertFalse(list(Path(tmp).glob("*.png")))
+
+    def test_resume_task_does_not_create_new_generation(self):
+        with MockRelay() as relay, tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli(
+                "genimg.py", ["--task-id", "img_task_mock_1",
+                              "--poll-interval", "1", "--out", "resumed.png"],
+                tmp, relay,
+            )
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertIn("续查异步任务", proc.stdout)
+            posts = [r for r in relay.requests if r["method"] == "POST"]
+            self.assertEqual([], posts)
+            self.assertTrue((Path(tmp) / "resumed.png").is_file())
+
     def test_list_models_shows_image_candidates_without_generating(self):
         with MockRelay() as relay, tempfile.TemporaryDirectory() as tmp:
             proc = run_cli("genimg.py", ["--list-models"], tmp, relay)

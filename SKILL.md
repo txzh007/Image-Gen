@@ -333,12 +333,34 @@ python3 genimg.py "提示词" --model gpt-image-2.6-flare --size 4K --timeout 60
    `content_policy_violation: 与第三方内容相似性防护限制` 拒绝；改成
    「银红配色的巨型科幻英雄」等描述性说法即可通过。
 
-异步端点（长任务）：
+### 新参数（已内置）
 
-- `POST /v1/images/generations/async`、`GET /v1/images/tasks/{task_id}` 由站点开关决定，
-  **未启用返回 404**，不能假定开放；查询要用提交时同一个 Key。
-- 本仓库的 `genimg.py` 目前只走同步 `/images/generations`；4K 实测 47–75s 可同步完成，
-  不需要 async。
+| 需求 | 参数 | 发出的字段 |
+|---|---|---|
+| 超分分组按分辨率出图 | `--size 1816x1024 --resolution 4K` | `"size":"1816x1024","resolution":"4K"` |
+| 成对宽高 | `--width 2048 --height 1152` | `"width":2048,"height":1152`（必须成对） |
+| 4K 别名 | `--size 4K` | `"size":"4K"` |
+
+`resolution` 由 **API Key 所属分组**路由：超分分组会按 `size` 的比例算出目标尺寸；普通分组
+不认（实测输出仍等于请求 size）。脚本只负责把字段原样提交，不做猜测。
+
+### 异步任务（`--async`）
+
+```bash
+python3 genimg.py "提示词" --async --size 4K --out ./out.png       # 创建 + 轮询 + 下载
+python3 genimg.py "提示词" --async --no-wait                        # 只拿 task_id
+python3 genimg.py --task-id TASK_ID --out ./out.png                 # 续查，不重新提交
+python3 genimg.py --resume-last                                      # 续查最近未完成任务
+python3 genimg.py --list-tasks                                       # 看本地任务记录
+```
+
+- 端点：`POST /images/generations/async`（编辑为 `/edits/async`）→
+  `GET /images/tasks/{task_id}`，查询必须用提交时同一个 Key。
+- **站点开关决定**：未启用返回 404 `async image tasks are not enabled`，脚本会提示
+  「去掉 --async 走同步」；4K 实测同步 47–75s 可完成，通常不需要异步。
+- 创建成功后立即把 task_id 写进输出目录 `.genimg-async-tasks.jsonl`；中断、超时、换会话
+  一律 `--task-id` 续查，**绝不重复提交付费任务**。
+- `--poll-interval`（默认 5s）、`--wait-timeout`（默认 900s）控制等待。
 
 ## GIF / 动图
 
