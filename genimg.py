@@ -1067,14 +1067,24 @@ def verify_requested_params(requested, saved):
         except ValueError:
             want_w = want_h = None
         actual = (first.get("width"), first.get("height"))
+        fmt_is_gif = str(requested.get("output_format")).lower() == "gif"
         if want_w and want_h and actual[0] and actual != (want_w, want_h):
-            problems.append(
-                f"请求 size={size}，实际 {actual[0]}x{actual[1]}：中转没有按 size 出图"
-            )
+            if fmt_is_gif:
+                problems.append(
+                    f"请求 size={size}，实际 {actual[0]}x{actual[1]}：GIF 直出会被压缩到 "
+                    "约 414 像素长边，调大 size 不生效（要更大用视频转 GIF）"
+                )
+            else:
+                problems.append(
+                    f"请求 size={size}，实际 {actual[0]}x{actual[1]}：中转没有按 size 出图"
+                )
     fmt = requested.get("output_format")
     if fmt:
-        want_mime = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}[fmt]
-        if first.get("mime") and first["mime"] != want_mime:
+        want_mime = {
+            "png": "image/png", "jpeg": "image/jpeg",
+            "webp": "image/webp", "gif": "image/gif",
+        }.get(fmt)
+        if want_mime and first.get("mime") and first["mime"] != want_mime:
             problems.append(
                 f"请求 output_format={fmt}，实际 {first['mime']}：中转忽略了输出格式"
             )

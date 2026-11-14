@@ -776,6 +776,28 @@ class ParameterVerificationTests(unittest.TestCase):
         )
         self.assertEqual([], problems)
 
+    def test_gif_format_does_not_raise(self):
+        # 回归：output_format=gif 曾在 MIME 映射里 KeyError
+        problems = genimg.verify_requested_params(
+            {"output_format": "gif"},
+            [{"width": 8, "height": 8, "mime": "image/gif"}],
+        )
+        self.assertEqual([], problems)
+
+    def test_gif_size_shrink_is_explained(self):
+        problems = genimg.verify_requested_params(
+            {"output_format": "gif", "size": "1024x1024"},
+            [{"width": 414, "height": 414, "mime": "image/gif"}],
+        )
+        self.assertTrue(any("GIF" in p and "414" in p for p in problems))
+
+    def test_gif_requested_but_png_returned_is_reported(self):
+        problems = genimg.verify_requested_params(
+            {"output_format": "gif"},
+            [{"width": 8, "height": 8, "mime": "image/png"}],
+        )
+        self.assertTrue(any("输出格式" in item for item in problems))
+
     def test_size_mismatch_is_reported(self):
         problems = genimg.verify_requested_params(
             {"size": "1024x1024"},

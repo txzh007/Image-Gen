@@ -316,8 +316,22 @@ GIF 能否直出**取决于中转**。官方把循环 GIF 放在 ChatGPT 应用�
 python3 genimg.py "一个挥手的小机器人，循环动画" --output-format gif --out ./out.gif
 ```
 
-实测 GIF 模式下尺寸会被压缩（请求 1024×1024 实际得到 412×414），按实际值汇报。
-拿不到时就退回视频转 GIF：
+**GIF 尺寸上限实测**：长边约 414–508 封顶，写更大的 size 不生效。
+
+| `--size` | 实际输出 | 结果 |
+|---|---|---|
+| `1024x1024` | 414×414 | 被压缩 |
+| `16:9` | 508×337 | 按比例压缩，宽度最大 |
+| `2K` | — | Cloudflare 524 |
+| 不指定 | — | 连接中断 |
+
+```bash
+# 推荐：显式给 size，横版拿到最大宽度
+python3 genimg.py "一只柯基幼犬摇尾巴，循环动画" \
+  --model gpt-image-2.6-flare --output-format gif --size 16:9 --out ./dog.gif
+```
+
+拿不到或需要更大尺寸时就退回视频转 GIF：
 
 ```bash
 python3 togif.py output/clip.mp4 --start 5 --duration 3

@@ -144,7 +144,7 @@ python3 genimg.py "提示词" --model gpt-image-2.5-flare   # 显式指定任意
 | 高清、2K、4K | `--size 2K` / `--size 4K` | **用 size 别名，不是 quality**；4K 实测 3840×2160 或 4096² |
 | 指定或换模型 | `--model NAME` | 不指定则自动择优 |
 | 种子、复现同一张 | `--param seed=42` |
-| 动图 / GIF | `--output-format gif` | 需中转支持，且尺寸会压缩 | 中转支持才有效 |
+| 动图 / GIF | `--output-format gif --size 16:9` | 需中转支持；长边约 414–508 封顶，横版最宽 | 中转支持才有效 |
 | 中转私有字段 | `--param key=value` | 支持 `a.b=value` 嵌套 |
 
 用户没提的一律用 provider 默认值：不擅自上 Pro、4K、透明底或更大尺寸。
@@ -376,8 +376,26 @@ python3 genimg.py --list-tasks                                       # 看本地
 python3 genimg.py "一个挥手的小机器人，循环动画" --output-format gif --out ./out.gif
 ```
 
-实测：请求 `size 1024x1024` 时 GIF 实际只有 **412x414** —— GIF 模式会压尺寸，别按请求值
-汇报。文件质量不满意就退回视频转 GIF：
+### GIF 的尺寸上限（实测）
+
+**长边约 414–508 像素封顶，写更大的 `size` 不生效。**
+
+| 请求 `--size` | 实际输出 | 帧数 | 结果 |
+|---|---|---|---|
+| `1024x1024` | 414×414 | 9 | ✅ 被压缩 |
+| `16:9` | **508×337** | 9 | ✅ 按比例压缩，宽度最大 |
+| `2K` | — | — | ❌ Cloudflare 524 超时 |
+| 不指定 | — | — | ❌ 连接中断（默认不可靠） |
+
+要 GIF 就**显式给 `--size`**（不指定容易断连）；想要最大宽度用 `16:9` 这类横版比例，
+比方形多出近 100 像素。被压缩时脚本会直接说明：
+
+```text
+⚠ 请求 size=1024x1024，实际 414x414：GIF 直出会被压缩到约 414 像素长边，
+  调大 size 不生效（要更大用视频转 GIF）
+```
+
+需要更大尺寸或更长时长，退回视频转 GIF：
 
 ```bash
 python3 togif.py output/clip.mp4 --start 5 --duration 3   # 截 5s 起 3 秒
